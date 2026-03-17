@@ -113,6 +113,36 @@
 		}
 	}
 
+	async function createApiError(response: Response, fallbackMessage: string): Promise<Error> {
+		let message = fallbackMessage;
+
+		try {
+			const payload = (await response.json()) as { message?: unknown; retryAfterSeconds?: unknown };
+			if (typeof payload.message === 'string' && payload.message.trim()) {
+				message = payload.message.trim();
+			}
+
+			if (response.status === 429 && typeof payload.retryAfterSeconds === 'number') {
+				const seconds = Math.max(1, Math.floor(payload.retryAfterSeconds));
+				message = `${message} Retry in ${seconds}s.`;
+			}
+		} catch {
+			if (response.status === 429) {
+				message = 'Too many requests. Please wait a moment and try again.';
+			}
+		}
+
+		return new Error(message);
+	}
+
+	function isRateLimitError(error: unknown): boolean {
+		if (!(error instanceof Error)) {
+			return false;
+		}
+
+		return /too many requests|retry in/i.test(error.message);
+	}
+
 	function stopPeerConnection() {
 		clearSignalingTimer();
 		if (!peer) return;
@@ -133,12 +163,12 @@
 		});
 
 		if (!response.ok) {
-			throw new Error('Could not publish session description');
+			throw await createApiError(response, 'Could not publish session description');
 		}
 	}
 
 	async function postIceCandidate(id: string, role: 'viewer' | 'phone', candidate: RTCIceCandidate) {
-		await fetch(`/api/sessions/${encodeURIComponent(id)}/ice`, {
+		const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/ice`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify({
@@ -151,18 +181,29 @@
 				}
 			})
 		});
+
+		if (!response.ok) {
+			throw await createApiError(response, 'Could not publish ICE candidate');
+		}
 	}
 
 	async function markSessionAsConnected(id: string) {
 		try {
 			appendSessionIdentityLog('POST connected');
-			await fetch(`/api/sessions/${encodeURIComponent(id)}/connected`, {
+			const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/connected`, {
 				method: 'POST',
 				headers: { 'content-type': 'application/json' }
 			});
+
+			if (!response.ok) {
+				throw await createApiError(response, 'Could not mark session as connected');
+			}
 		} catch (err) {
 			console.error('Failed to mark session as connected:', err);
 			appendSessionIdentityLog(`POST connected failed: ${String(err)}`);
+			if (err instanceof Error && isRateLimitError(err)) {
+				signalingStatus = err.message;
+			}
 		}
 	}
 
@@ -171,6 +212,10 @@
 
 		if (response.status === 404) {
 			throw new Error('Session expired or missing');
+		}
+
+		if (response.status === 429) {
+			throw await createApiError(response, 'Too many requests while waiting for viewer offer');
 		}
 
 		if (!response.ok) {
@@ -198,6 +243,13 @@
 			appendSessionIdentityLog('pollViewerIce: session not found (404)');
 			clearSessionIdentityForSession(id);
 			stopPeerConnection();
+			return;
+		}
+
+		if (response.status === 429) {
+			const err = await createApiError(response, 'Too many requests while syncing ICE');
+			signalingStatus = err.message;
+			appendSessionIdentityLog(`pollViewerIce: rate limited (${err.message})`);
 			return;
 		}
 
@@ -266,7 +318,13 @@
 
 		peer.onicecandidate = (event) => {
 			if (!event.candidate) return;
-			void postIceCandidate(sessionId, 'phone', event.candidate);
+			void postIceCandidate(sessionId, 'phone', event.candidate).catch((err) => {
+				console.error('Failed to publish phone ICE candidate:', err);
+				appendSessionIdentityLog(`postIceCandidate failed: ${String(err)}`);
+				if (err instanceof Error && isRateLimitError(err)) {
+					signalingStatus = err.message;
+				}
+			});
 		};
 
 		peer.onconnectionstatechange = () => {
@@ -377,9 +435,13 @@
 				clearSessionIdentityForSession(sessionId);
 			}
 
-			setCameraError(err);
-
-			signalingStatus = 'Not connected';
+			if (err instanceof Error && err.message.trim()) {
+				error = err.message.trim();
+				signalingStatus = err.message.trim();
+			} else {
+				setCameraError(err);
+				signalingStatus = 'Not connected';
+			}
 		}
 	}
 
