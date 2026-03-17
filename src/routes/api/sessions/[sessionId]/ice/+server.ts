@@ -1,6 +1,8 @@
 import { error, json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { addIceCandidate, getIceCandidatesForPeer, getSession } from '$lib/server/ice-store';
+import { addIceCandidate, getIceCandidatesForPeer } from '$lib/server/ice-candidate-store';
+import { getSession } from '$lib/server/session-store';
+import { checkRateLimit } from '$lib/server/rate-limit';
 
 function sessionIdOrThrow(raw: string): string {
 	const sessionId = raw.trim();
@@ -29,7 +31,18 @@ function parseInteger(value: string | null, fallback: number): number {
 	return parsed;
 }
 
-export const GET: RequestHandler = async ({ params, url }) => {
+export const GET: RequestHandler = async (event) => {
+	const limitResult = checkRateLimit(event, {
+		bucket: 'sessions:ice:get',
+		windowMs: 60_000,
+		maxRequests: 300
+	});
+
+	if (!limitResult.allowed) {
+		throw error(429, `Too many requests. Retry in ${limitResult.retryAfterSeconds}s`);
+	}
+
+	const { params, url } = event;
 	const sessionId = sessionIdOrThrow(params.sessionId);
 
 	if (!(await getSession(sessionId))) {
@@ -41,12 +54,23 @@ export const GET: RequestHandler = async ({ params, url }) => {
 	const limit = parseInteger(url.searchParams.get('limit'), 100);
 
 	const candidates = await getIceCandidatesForPeer(sessionId, recipientRole, after, limit);
-	const nextAfter = candidates.length > 0 ? candidates[candidates.length - 1].id : after;
+	const nextAfter = candidates.length > 0 ? (candidates.at(-1)?.id ?? after) : after;
 
 	return json({ sessionId, candidates, nextAfter });
 };
 
-export const POST: RequestHandler = async ({ params, request }) => {
+export const POST: RequestHandler = async (event) => {
+	const limitResult = checkRateLimit(event, {
+		bucket: 'sessions:ice:post',
+		windowMs: 60_000,
+		maxRequests: 240
+	});
+
+	if (!limitResult.allowed) {
+		throw error(429, `Too many requests. Retry in ${limitResult.retryAfterSeconds}s`);
+	}
+
+	const { params, request } = event;
 	const sessionId = sessionIdOrThrow(params.sessionId);
 	const payload = (await request.json().catch(() => null)) as
 		| { role?: unknown; candidate?: unknown }
@@ -57,7 +81,7 @@ export const POST: RequestHandler = async ({ params, request }) => {
 	}
 
 	const role = normalizeRole(payload.role);
-	if (!Object.prototype.hasOwnProperty.call(payload, 'candidate')) {
+	if (!Object.hasOwn(payload, 'candidate')) {
 		throw error(400, 'Missing ICE candidate payload');
 	}
 

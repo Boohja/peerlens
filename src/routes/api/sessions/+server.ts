@@ -1,14 +1,7 @@
 import { json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
-import { createOrTouchSession } from '$lib/server/ice-store';
-
-function normalizeSessionId(value: unknown): string | null {
-	if (typeof value !== 'string') return null;
-	const sessionId = value.trim();
-	if (!sessionId) return null;
-	if (sessionId.length > 128) return null;
-	return sessionId;
-}
+import { createOrTouchSession } from '$lib/server/session-store';
+import { checkRateLimit } from '$lib/server/rate-limit';
 
 function generateSessionId(): string {
 	if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -18,19 +11,18 @@ function generateSessionId(): string {
 	return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export const POST: RequestHandler = async ({ request }) => {
-	let payload: unknown = {};
+export const POST: RequestHandler = async (event) => {
+	const limit = checkRateLimit(event, {
+		bucket: 'sessions:create',
+		windowMs: 60_000,
+		maxRequests: 20
+	});
 
-	if (request.headers.get('content-type')?.includes('application/json')) {
-		payload = await request.json().catch(() => ({}));
+	if (!limit.allowed) {
+		return json({ message: 'Too many requests', retryAfterSeconds: limit.retryAfterSeconds }, { status: 429 });
 	}
 
-	const requestedSessionId =
-		typeof payload === 'object' && payload !== null
-			? normalizeSessionId((payload as { sessionId?: unknown }).sessionId)
-			: null;
-
-	const sessionId = requestedSessionId || generateSessionId();
+	const sessionId = generateSessionId();
 	await createOrTouchSession(sessionId);
 
 	return json({ sessionId });

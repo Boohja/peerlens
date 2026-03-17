@@ -1,11 +1,12 @@
 import { error, json } from '@sveltejs/kit';
 import type { RequestHandler } from './$types';
+import { checkRateLimit } from '$lib/server/rate-limit';
 import {
 	getSession,
 	setSessionRoleState,
 	type SessionPartyState,
 	type SessionRole
-} from '$lib/server/ice-store';
+} from '$lib/server/session-store';
 
 function sessionIdOrThrow(raw: string): string {
 	const sessionId = raw.trim();
@@ -44,7 +45,18 @@ function normalizeExpectedVersion(value: unknown): number | undefined {
 	return value;
 }
 
-export const GET: RequestHandler = async ({ params }) => {
+export const GET: RequestHandler = async (event) => {
+	const limit = checkRateLimit(event, {
+		bucket: 'sessions:state:get',
+		windowMs: 60_000,
+		maxRequests: 180
+	});
+
+	if (!limit.allowed) {
+		throw error(429, `Too many requests. Retry in ${limit.retryAfterSeconds}s`);
+	}
+
+	const { params } = event;
 	const sessionId = sessionIdOrThrow(params.sessionId);
 	const session = await getSession(sessionId);
 
@@ -63,7 +75,18 @@ export const GET: RequestHandler = async ({ params }) => {
 	});
 };
 
-export const PATCH: RequestHandler = async ({ params, request }) => {
+export const PATCH: RequestHandler = async (event) => {
+	const limit = checkRateLimit(event, {
+		bucket: 'sessions:state:patch',
+		windowMs: 60_000,
+		maxRequests: 120
+	});
+
+	if (!limit.allowed) {
+		throw error(429, `Too many requests. Retry in ${limit.retryAfterSeconds}s`);
+	}
+
+	const { params, request } = event;
 	const sessionId = sessionIdOrThrow(params.sessionId);
 	const payload = (await request.json().catch(() => null)) as
 		| { actor?: unknown; nextState?: unknown; expectedVersion?: unknown }
