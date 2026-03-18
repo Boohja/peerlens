@@ -20,6 +20,10 @@
 	let lastIceId = 0;
 	let lastOfferUpdatedAt = 0;
 	let phonePublishedAnswer = false;
+	let gatheredLocalCandidates: RTCIceCandidate[] = [];
+	let rejectedPublicIpv6Candidates: RTCIceCandidate[] = [];
+	let publicIpv6PromptHandled = false;
+	let showIpv6FallbackModal = false;
 
 	let idleOverlay = false;
 	let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -143,6 +147,54 @@
 		return /too many requests|retry in/i.test(error.message);
 	}
 
+	function extractCandidateAddress(candidateLine: string): string | null {
+		const parts = candidateLine.trim().split(/\s+/);
+		if (parts.length < 6) return null;
+		return parts[4] ?? null;
+	}
+
+	function isPrivateIpv4Address(address: string): boolean {
+		const match = address.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+		if (!match) return false;
+
+		const octets = match.slice(1).map((part) => Number(part));
+		if (octets.some((part) => Number.isNaN(part) || part < 0 || part > 255)) return false;
+
+		const [first, second] = octets;
+		if (first === 10) return true;
+		if (first === 192 && second === 168) return true;
+		if (first === 172 && second >= 16 && second <= 31) return true;
+		if (first === 169 && second === 254) return true;
+
+		return false;
+	}
+
+	function isLocalAddress(address: string): boolean {
+		const normalized = address.toLowerCase();
+
+		if (normalized === 'localhost' || normalized === '::1' || normalized.endsWith('.local')) {
+			return true;
+		}
+
+		if (isPrivateIpv4Address(normalized)) {
+			return true;
+		}
+
+		if (normalized.includes(':')) {
+			if (normalized.startsWith('fe80:')) return true;
+			if (/^f[c-d][0-9a-f]{0,2}:/i.test(normalized)) return true;
+		}
+
+		return false;
+	}
+
+	function isPublicIpv6Address(address: string): boolean {
+		const normalized = address.toLowerCase();
+		if (!normalized.includes(':')) return false;
+		if (isLocalAddress(normalized)) return false;
+		return /^[23][0-9a-f]{0,3}:/i.test(normalized);
+	}
+
 	function stopPeerConnection() {
 		clearSignalingTimer();
 		if (!peer) return;
@@ -152,6 +204,65 @@
 		peer.close();
 		peer = null;
 		lastIceId = 0;
+	}
+
+	function openImplicationsPage() {
+		window.open('/ipv6', '_blank', 'noopener,noreferrer');
+	}
+
+	function stopForRejectedIpv6Fallback() {
+		appendSessionIdentityLog('user rejected public IPv6 fallback candidate; stopping phone stream');
+		error = 'Connection stopped because only public IPv6 was available and not approved.';
+		signalingStatus = 'Stopped';
+		showIpv6FallbackModal = false;
+		stopCamera();
+	}
+
+	function confirmIpv6FallbackCandidate() {
+		const fallbackCandidate = rejectedPublicIpv6Candidates[0];
+		if (!fallbackCandidate) {
+			showIpv6FallbackModal = false;
+			stopForRejectedIpv6Fallback();
+			return;
+		}
+
+		appendSessionIdentityLog('user accepted public IPv6 fallback candidate');
+		signalingStatus = 'Connecting (public IPv6 fallback approved)...';
+		showIpv6FallbackModal = false;
+		void publishAnswerAndCandidates([fallbackCandidate]);
+	}
+
+	async function publishAnswerAndCandidates(candidates: RTCIceCandidate[]) {
+		if (!peer?.localDescription?.sdp) {
+			appendSessionIdentityLog('publishAnswerAndCandidates: missing local SDP');
+			return;
+		}
+
+		try {
+			await postDescription(sessionId, 'answer', peer.localDescription.sdp);
+		} catch (err) {
+			console.error('Failed to post answer:', err);
+			appendSessionIdentityLog(`postDescription failed: ${String(err)}`);
+			signalingStatus = err instanceof Error ? err.message : 'Could not publish answer';
+			return;
+		}
+
+		phonePublishedAnswer = true;
+		void setPhoneState('waiting');
+		appendSessionIdentityLog('answer published; waiting for connection');
+		signalingStatus = 'Answer published. Connecting...';
+
+		for (const candidate of candidates) {
+			void postIceCandidate(sessionId, 'phone', candidate).catch((err) => {
+				console.error('Failed to publish phone ICE candidate:', err);
+				appendSessionIdentityLog(`postIceCandidate failed: ${String(err)}`);
+				if (err instanceof Error && isRateLimitError(err)) {
+					signalingStatus = err.message;
+				}
+			});
+		}
+
+		startIcePolling(sessionId);
 	}
 
 	async function postDescription(id: string, type: 'offer' | 'answer', sdp: string) {
@@ -304,6 +415,10 @@
 
 		stopPeerConnection();
 		phonePublishedAnswer = false;
+		gatheredLocalCandidates = [];
+		rejectedPublicIpv6Candidates = [];
+		publicIpv6PromptHandled = false;
+		showIpv6FallbackModal = false;
 		signalingStatus = 'Waiting for viewer offer...';
 		appendSessionIdentityLog(`start signaling (newerThan=${newerThan})`);
 
@@ -317,14 +432,41 @@
 		}
 
 		peer.onicecandidate = (event) => {
-			if (!event.candidate) return;
-			void postIceCandidate(sessionId, 'phone', event.candidate).catch((err) => {
-				console.error('Failed to publish phone ICE candidate:', err);
-				appendSessionIdentityLog(`postIceCandidate failed: ${String(err)}`);
-				if (err instanceof Error && isRateLimitError(err)) {
-					signalingStatus = err.message;
+			if (!event.candidate) {
+				if (publicIpv6PromptHandled) return;
+
+				if (gatheredLocalCandidates.length > 0) {
+					void publishAnswerAndCandidates(gatheredLocalCandidates);
+				} else if (rejectedPublicIpv6Candidates.length > 0) {
+					publicIpv6PromptHandled = true;
+					signalingStatus = 'Public IPv6 found. Waiting for your decision...';
+					showIpv6FallbackModal = true;
+				} else {
+					signalingStatus = 'No local address found.';
+					error = 'Could not find any local network address to use for the connection.';
 				}
-			});
+
+				return;
+			}
+
+			const address = extractCandidateAddress(event.candidate.candidate);
+			if (!address) {
+				appendSessionIdentityLog('rejected ICE candidate: unable to parse address');
+				return;
+			}
+
+			// if (isLocalAddress(address)) {
+			// 	gatheredLocalCandidates.push(event.candidate);
+			// 	return;
+			// }
+
+			if (isPublicIpv6Address(address)) {
+				rejectedPublicIpv6Candidates.push(event.candidate);
+				appendSessionIdentityLog(`rejected public IPv6 ICE candidate (${address})`);
+				return;
+			}
+
+			appendSessionIdentityLog(`rejected non-local ICE candidate (${address})`);
 		};
 
 		peer.onconnectionstatechange = () => {
@@ -371,12 +513,9 @@
 			throw new Error('Missing local answer SDP');
 		}
 
-		await postDescription(sessionId, 'answer', peer.localDescription.sdp);
-		phonePublishedAnswer = true;
-		void setPhoneState('waiting');
-		appendSessionIdentityLog('answer published; waiting for connection');
-		signalingStatus = 'Answer published. Connecting...';
-		startIcePolling(sessionId);
+		signalingStatus = 'Gathering local addresses...';
+		appendSessionIdentityLog('local description set; gathering ICE candidates');
+		// Answer and candidates are published from onicecandidate once gathering completes
 	}
 
 	async function loadCameras(preferredDeviceId = '') {
@@ -499,6 +638,7 @@
 			void setPhoneState('waiting');
 		}
 		phonePublishedAnswer = false;
+		showIpv6FallbackModal = false;
 		clearIdleTimer();
 		lastOfferUpdatedAt = 0;
 		signalingStatus = 'Stopped';
@@ -632,6 +772,44 @@
 	</div>
 </div>
 
+{#if showIpv6FallbackModal}
+	<div class="modal-backdrop" role="presentation">
+		<div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="ipv6-modal-title">
+			<h3 id="ipv6-modal-title">Allow public IPv6 for setup?</h3>
+			<p>
+				Your phone did not provide a local-only IP, but it found a public IPv6 address.
+			</p>
+			<p>
+				That address is exposed only during session setup. You can review details before deciding.
+			</p>
+			<div class="modal-actions">
+				<button class="btn btn-phone block" type="button" on:click={openImplicationsPage}>
+					<svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+						<circle cx="12" cy="12" r="10" />
+						<path d="M12 16V11.5" />
+						<path d="M12 8.01172V8.00172" />
+					</svg>
+					See implications
+				</button>
+				<button class="btn btn-phone" type="button" on:click={confirmIpv6FallbackCandidate}>
+					<svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+						<path d="M17 3.33782C15.5291 2.48697 13.8214 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22C17.5228 22 22 17.5228 22 12C22 11.3151 21.9311 10.6462 21.8 10" />
+						<path d="M8 12.5C8 12.5 9.5 12.5 11.5 16C11.5 16 17.0588 6.83333 22 5" />
+					</svg>
+					Confirm IPv6
+				</button>
+				<button class="btn btn-phone" type="button" on:click={stopForRejectedIpv6Fallback}>
+					<svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="#141B34" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M12 21.5H12H12C16.4783 21.5 18.7175 21.5 20.1088 20.1088C21.5 18.7175 21.5 16.4783 21.5 12V12V12C21.5 7.52165 21.5 5.28248 20.1088 3.89124C18.7175 2.5 16.4783 2.5 12 2.5C7.52166 2.5 5.28249 2.5 3.89124 3.89124C2.5 5.28249 2.5 7.52166 2.5 12C2.5 16.4783 2.5 18.7175 3.89124 20.1088C5.28248 21.5 7.52165 21.5 12 21.5Z" />
+						<path d="M15 9L9 14.9996M15 15L9 9.00039" />
+					</svg>
+					Stop
+				</button>
+			</div>
+		</div>
+	</div>
+{/if}
+
 <style>
 	.camera-stream {
 		display: grid;
@@ -746,6 +924,36 @@
 	.error {
 		color: #ff8a8a;
 		margin: 0;
+	}
+
+	.modal-backdrop {
+		position: fixed;
+		inset: 0;
+		z-index: 250;
+		display: grid;
+		place-items: center;
+		padding: 1rem;
+		background: rgba(0, 0, 0, 0.7);
+	}
+
+	.modal-card {
+		display: grid;
+		gap: 0.75rem;
+		width: min(92vw, 460px);
+		padding: 1rem;
+		border-radius: 0.9rem;
+		border: 1px solid rgba(255, 255, 255, 0.25);
+		background: color-mix(in srgb, var(--phone-bg) 85%, black 15%);
+	}
+
+	.modal-card h3,
+	.modal-card p {
+		margin: 0;
+	}
+
+	.modal-actions {
+		display: grid;
+		gap: 0.5rem;
 	}
 
 	@media (max-width: 760px) {

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { onDestroy, onMount } from 'svelte';
+	import { onDestroy } from 'svelte';
 	import {
 		appendSessionIdentityLog,
 		clearSessionIdentity,
@@ -8,18 +8,22 @@
 	} from '$lib/session-identity';
 	import { patchSessionRoleState } from '$lib/session-state';
 	import { toast } from '$lib/toast';
-	import { buildPhoneJoinUrl, isPublicHostConfigured } from '$lib/webrtc/config';
+	import { buildPhoneJoinUrl } from '$lib/webrtc/config';
+	import ViewerLanding from '$lib/viewer/ViewerLanding.svelte';
+	import ViewerQrPanel from '$lib/viewer/ViewerQrPanel.svelte';
+	import ViewerStream from '$lib/viewer/ViewerStream.svelte';
+
+	type ViewerStep = 'landing' | 'qr' | 'stream';
 
 	let sessionId = $state('');
 	let phoneJoinUrl = $state('');
 	let qrCodeUrl = $state('');
-	let status = $state('Idle');
-	let previousStatus = $state('Idle');
+	let status = $state('');
+	let previousStatus = $state('');
 	let blurCode = $state(false);
-	let tab = $state<'code' | 'stream'>('code');
+	let step = $state<ViewerStep>('landing');
 	let videoFit = $state<'contain' | 'cover'>('contain');
 	let fullscreen = $state(false);
-	let remoteVideoEl = $state<HTMLVideoElement | undefined>(undefined);
 	let remoteStream = $state<MediaStream | null>(null);
 	let qrModulePromise: Promise<typeof import('qrcode')> | null = null;
 
@@ -93,11 +97,6 @@
 		}
 
 		remoteStream = null;
-
-		if (remoteVideoEl) {
-			remoteVideoEl.srcObject = null;
-		}
-		tab = 'code';
 	}
 
 	$effect(() => {
@@ -109,22 +108,7 @@
 	});
 
 	$effect(() => {
-		if (tab !== 'stream') fullscreen = false;
-	});
-
-	$effect(() => {
-		if (!remoteVideoEl) {
-			return;
-		}
-
-		if (remoteStream && remoteVideoEl.srcObject !== remoteStream) {
-			remoteVideoEl.srcObject = remoteStream;
-			void remoteVideoEl.play().catch((err) => {
-				appendSessionIdentityLog(`video play() rejected: ${String(err)}`);
-			});
-		} else if (!remoteStream && remoteVideoEl.srcObject) {
-			remoteVideoEl.srcObject = null;
-		}
+		if (step !== 'stream') fullscreen = false;
 	});
 
 	async function deleteSession(id: string) {
@@ -138,11 +122,48 @@
 		}
 	}
 
+	async function createApiError(response: Response, fallbackMessage: string): Promise<Error> {
+		let message = fallbackMessage;
+
+		try {
+			const payload = (await response.json()) as { message?: unknown; retryAfterSeconds?: unknown };
+			if (typeof payload.message === 'string' && payload.message.trim()) {
+				message = payload.message.trim();
+			}
+
+			if (response.status === 429 && typeof payload.retryAfterSeconds === 'number') {
+				const seconds = Math.max(1, Math.floor(payload.retryAfterSeconds));
+				message = `${message} Retry in ${seconds}s.`;
+			}
+		} catch {
+			if (response.status === 429) {
+				message = 'Too many requests. Please wait a moment and try again.';
+			}
+		}
+
+		return new Error(message);
+	}
+
+	function getErrorMessage(error: unknown, fallbackMessage: string): string {
+		if (error instanceof Error && error.message.trim()) {
+			return error.message.trim();
+		}
+
+		return fallbackMessage;
+	}
+
+	function handleRefreshSessionError(error: unknown) {
+		const message = getErrorMessage(error, 'Could not create a new session');
+		appendSessionIdentityLog(`refreshSession failed: ${message}`);
+		status = message;
+		toast('error', message);
+	}
+
 	async function createSession(): Promise<string> {
 		appendSessionIdentityLog('POST /api/sessions');
 		const response = await fetch('/api/sessions', { method: 'POST' });
 		if (!response.ok) {
-			throw new Error('Could not create signaling session');
+			throw await createApiError(response, 'Could not create signaling session');
 		}
 
 		const payload = (await response.json()) as { sessionId: string };
@@ -164,7 +185,7 @@
 		});
 
 		if (!response.ok) {
-			throw new Error('Could not publish session description');
+			throw await createApiError(response, 'Could not publish session description');
 		}
 	}
 
@@ -206,6 +227,7 @@
 		if (response.status === 404) {
 			status = 'Session expired. Create a new session.';
 			blurCode = true;
+			step = 'qr';
 			appendSessionIdentityLog('pollAnswer: session not found (404)');
 			clearSessionIdentityForSession(id);
 			teardownPeer();
@@ -237,6 +259,7 @@
 		if (response.status === 404) {
 			status = 'Session expired. Create a new session.';
 			blurCode = true;
+			step = 'qr';
 			appendSessionIdentityLog('pollIce: session not found (404)');
 			clearSessionIdentityForSession(id);
 			teardownPeer();
@@ -309,6 +332,7 @@
 
 		peer.onicecandidate = (event) => {
 			if (!event.candidate) return;
+			console.log(event.candidate);
 			void postIceCandidate(id, 'viewer', event.candidate);
 		};
 
@@ -321,13 +345,13 @@
 					clearTimeout(reconnectTimer);
 					reconnectTimer = null;
 				}
-				tab = 'stream';
+				step = 'stream';
 				status = 'Connected';
 				appendSessionIdentityLog('peer connected');
 				void setViewerState(id, 'party');
 				void markSessionAsConnected(id);
 			} else if (peer.connectionState === 'failed') {
-				tab = 'code';
+				step = 'qr';
 				status = 'Disconnected';
 				appendSessionIdentityLog('peer failed');
 				if (viewerWasConnected) {
@@ -338,7 +362,7 @@
 				teardownPeer();
 				void setupPeerConnection(sessionId).catch(console.error);
 			} else if (peer.connectionState === 'disconnected') {
-				tab = 'code';
+				step = 'qr';
 				status = 'Disconnected';
 				appendSessionIdentityLog('peer disconnected');
 				if (viewerWasConnected) {
@@ -368,12 +392,15 @@
 		await postDescription(id, 'offer', peer.localDescription.sdp);
 		void setViewerState(id, 'offered');
 		viewerWasConnected = false;
+		step = 'qr';
 		status = 'Waiting for phone to scan code...';
 		startPolling(id);
 	}
 
 	async function refreshSession() {
 		const previousSessionId = sessionId;
+		step = 'qr';
+		fullscreen = false;
 		teardownPeer();
 		if (previousSessionId) {
 			void setViewerState(previousSessionId, 'left');
@@ -399,14 +426,6 @@
 		await setupPeerConnection(sessionId);
 	}
 
-	onMount(() => {
-		void refreshSession().catch((err) => {
-			console.error(err);
-			appendSessionIdentityLog(`viewer init failed: ${String(err)}`);
-			status = 'Could not initialize viewer session';
-		});
-	});
-
 	onDestroy(() => {
 		const currentSessionId = sessionId;
 		teardownPeer();
@@ -420,234 +439,36 @@
 </script>
 
 <svelte:head>
-	<title>Viewer Session</title>
+	<title>PeerLens Viewer</title>
 </svelte:head>
 
 <svelte:window onkeydown={(e) => { if (e.key === 'Escape' && fullscreen) fullscreen = false; }} />
 
 <main class="content">
-
-	{#if tab === 'stream'}
-		<div class="video-wrap" class:fullscreen>
-			<div class="video-controls">
-				<button
-					type="button"
-					class:active={videoFit === 'cover'}
-					onclick={() => { videoFit = 'cover'; fullscreen = true; }}
-					title="Fill width — crops top and bottom"
-				>
-					<svg viewBox="0 0 20 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-						<rect x="0" y="0" width="20" height="12" rx="1" fill="currentColor" opacity="0.25"/>
-						<rect x="5" y="0" width="10" height="12" rx="1" fill="currentColor"/>
-						<line x1="0" y1="3" x2="20" y2="3" stroke="currentColor" stroke-width="0.75" stroke-dasharray="2 2" opacity="0.6"/>
-						<line x1="0" y1="9" x2="20" y2="9" stroke="currentColor" stroke-width="0.75" stroke-dasharray="2 2" opacity="0.6"/>
-					</svg>
-					Fill width
-				</button>
-				<button
-					type="button"
-					class:active={videoFit === 'contain'}
-					onclick={() => { videoFit = 'contain'; fullscreen = true; }}
-					title="Fit height — black bars on sides"
-				>
-					<svg viewBox="0 0 20 12" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-						<rect x="0" y="0" width="20" height="12" rx="1" fill="currentColor" opacity="0.25"/>
-						<rect x="7" y="0" width="6" height="12" rx="1" fill="currentColor"/>
-					</svg>
-					Fit height
-				</button>
-				{#if fullscreen}
-					<button
-						type="button"
-						class="close-btn"
-						onclick={() => (fullscreen = false)}
-						title="Exit fullscreen"
-					>✕</button>
-				{/if}
-			</div>
-			<video
-				bind:this={remoteVideoEl}
-				autoplay
-				muted
-				playsinline
-				class="remote-video"
-				class:fit-cover={videoFit === 'cover'}
-			></video>
-			<p class="status">{status}</p>
-
-			{#if status === 'Disconnected'}
-				<button class="btn btn-viewer" type="button" onclick={refreshSession}>Retry</button>
-			{/if}
-		</div>
-
-  {:else if tab === 'code'}
-    <div class="card">
-      <p>Scan this QR code from your phone to connect with this device.</p>
-      <div class="qr-wrap {blurCode ? 'blur' : ''}">
-				{#if qrCodeUrl}
-					<img src={qrCodeUrl} alt="QR code for phone join URL" class="qr-image" />
-					<a class="text-xs -mt-3 opacity-45" href={phoneJoinUrl} target="_blank" rel="noopener noreferrer">
-						{phoneJoinUrl}
-					</a>
-				{:else}
-					<p>Generating QR code...</p>
-				{/if}
-      </div>
-
-      <div class="details">
-        <p><strong>Status:</strong> {status}</p>
-      </div>
-
-			<button class="btn btn-viewer" type="button" onclick={refreshSession}>New session</button>
-    </div>
-
-    {#if !isPublicHostConfigured()}
-      <div class="card">
-        Tip: set <code>PUBLIC_APP_HOST</code> (for example, your LAN IP origin) so phones on the
-        same network can open the correct host URL.
-      </div>
-    {/if}
-  {/if}
+	{#if step === 'landing'}
+		<ViewerLanding on:start={() => void refreshSession().catch(handleRefreshSessionError)} />
+	{:else if step === 'qr'}
+		<ViewerQrPanel
+			{qrCodeUrl}
+			{phoneJoinUrl}
+			{status}
+			{blurCode}
+			on:renew={() => void refreshSession().catch(handleRefreshSessionError)}
+		/>
+	{:else if step === 'stream'}
+		<ViewerStream
+			{remoteStream}
+			{status}
+			{fullscreen}
+			{videoFit}
+			on:fitchange={(event) => {
+				videoFit = event.detail;
+			}}
+			on:fullscreenchange={(event) => {
+				fullscreen = event.detail;
+			}}
+			on:retry={() => void refreshSession().catch(handleRefreshSessionError)}
+		/>
+	{/if}
 
 </main>
-
-<style>
-	p {
-		margin: 0;
-	}
-
-	.qr-wrap {
-		display: grid;
-		place-items: center;
-	}
-
-	.video-wrap {
-		position: relative;
-	}
-
-	.video-wrap.fullscreen {
-		position: fixed;
-		inset: 0;
-		z-index: 100;
-		background: #000;
-	}
-
-	.video-controls {
-		display: flex;
-		gap: 0.5rem;
-		margin-bottom: 0.5rem;
-	}
-
-	.video-wrap.fullscreen .video-controls {
-		position: absolute;
-		top: 0;
-		left: 0;
-		right: 0;
-		z-index: 1;
-		margin-bottom: 0;
-		padding: 0.75rem;
-		background: linear-gradient(to bottom, rgba(0, 0, 0, 0.6), transparent);
-	}
-
-	.video-controls button {
-		display: flex;
-		align-items: center;
-		gap: 0.4rem;
-		padding: 0.4rem 0.75rem;
-		border-radius: 0.5rem;
-		border: 1px solid rgba(92, 92, 92, 0.2);
-		background: rgba(15, 15, 15, 0.08);
-		color: #1d1d1d;
-		font-size: 0.85rem;
-		cursor: pointer;
-	}
-
-	.video-controls button.active {
-		background: rgba(117, 117, 117, 0.25);
-		border-color: rgba(85, 85, 85, 0.5);
-	}
-
-  .fullscreen .video-controls button {
-    border: 1px solid rgba(92, 92, 92, 0.2);
-		background: rgba(43, 43, 43, 0.4);
-    color: #bbbbbb;
-    text-shadow: 0 0 5px rgba(3, 3, 3, 0.7);
-  }
-
-  .fullscreen .video-controls button.active {
-		border-color: rgba(189, 189, 189, 0.5);
-	}
-
-	.video-controls svg {
-		width: 1.25rem;
-		height: 0.75rem;
-		flex-shrink: 0;
-	}
-
-	.close-btn {
-		margin-left: auto;
-		font-size: 1.1rem;
-		line-height: 1;
-	}
-
-	.remote-video {
-		width: 100%;
-		height: 80vh;
-		background: #000;
-		border-radius: 0.75rem;
-		object-fit: contain;
-	}
-
-	.remote-video.fit-cover {
-		object-fit: cover;
-	}
-
-	.video-wrap.fullscreen .remote-video {
-		position: absolute;
-		inset: 0;
-		width: 100%;
-		height: 100%;
-		border-radius: 0;
-	}
-
-	.video-wrap.fullscreen .btn {
-		position: absolute;
-		bottom: 3.5rem;
-		left: 50%;
-		transform: translateX(-50%);
-		z-index: 1;
-	}
-
-	.qr-image {
-		width: min(320px, 100%);
-		height: auto;
-		border-radius: 0.75rem;
-		background: white;
-		padding: 0.75rem;
-    margin: 1rem;
-	}
-
-	.details {
-		display: grid;
-		gap: 0.35rem;
-		word-break: break-word;
-    margin-bottom: 1rem;
-	}
-
-	button {
-		padding: 0.7rem 1rem;
-		border: 0;
-		border-radius: 0.6rem;
-		font: inherit;
-		cursor: pointer;
-	}
-
-	.status {
-		color: #d8ffd8;
-	}
-
-	.blur {
-		filter: blur(8px);
-	}
-
-</style>

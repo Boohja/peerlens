@@ -53,5 +53,15 @@
 
 	<Navbar />
 
-	{@render children()}
+	<main class="app-main">
+		{@render children()}
+	</main>
+
+	<footer class="site-footer" aria-label="Site footer">
+		<p class="site-footer-byline">by <a href="https://sorkos.net" target="_blank" rel="noopener noreferrer">sorkos.net</a></p>
+		<div class="site-footer-links" aria-label="Legal links">
+			<a href="/privacy">Privacy</a>
+			<a href="/data">Data</a>
+		</div>
+	</footer>
 </div>
