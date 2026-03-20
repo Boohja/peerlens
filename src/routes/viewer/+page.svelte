@@ -3,6 +3,13 @@
 	import { ClientSession, tryRecoverSession } from '$lib/client-session';
 	import { toast } from '$lib/toast';
 	import { buildPhoneJoinUrl } from '$lib/webrtc/config';
+	import {
+		createApiError,
+		postDescription,
+		postViewerIceCandidate,
+		fetchIceCandidatesForViewer,
+		markSessionAsConnected
+	} from '$lib/webrtc/signaling-client';
 	import ViewerLanding from '$lib/viewer/ViewerLanding.svelte';
 	import ViewerQrPanel from '$lib/viewer/ViewerQrPanel.svelte';
 	import ViewerStream from '$lib/viewer/ViewerStream.svelte';
@@ -82,40 +89,12 @@
 		if (step !== 'stream') fullscreen = false;
 	});
 
-	async function createApiError(response: Response, fallbackMessage: string): Promise<Error> {
-		let message = fallbackMessage;
-
-		try {
-			const payload = (await response.json()) as { message?: unknown; retryAfterSeconds?: unknown };
-			if (typeof payload.message === 'string' && payload.message.trim()) {
-				message = payload.message.trim();
-			}
-
-			if (response.status === 429 && typeof payload.retryAfterSeconds === 'number') {
-				const seconds = Math.max(1, Math.floor(payload.retryAfterSeconds));
-				message = `${message} Retry in ${seconds}s.`;
-			}
-		} catch {
-			if (response.status === 429) {
-				message = 'Too many requests. Please wait a moment and try again.';
-			}
-		}
-
-		return new Error(message);
-	}
-
 	function getErrorMessage(error: unknown, fallbackMessage: string): string {
 		if (error instanceof Error && error.message.trim()) {
 			return error.message.trim();
 		}
 
 		return fallbackMessage;
-	}
-
-	function stripIceCandidatesFromSdp(sdp: string): string {
-		return sdp
-			.replace(/^a=candidate:.*(?:\r?\n)?/gm, '')
-			.replace(/^a=end-of-candidates(?:\r?\n)?/gm, '');
 	}
 
 	function handleRefreshSessionError(error: unknown) {
@@ -148,51 +127,6 @@
 		session.log(`session created: ${payload.sessionId}`);
 
 		return payload.sessionId;
-	}
-
-	async function postDescription(id: string, type: 'offer' | 'answer', sdp: string) {
-		session.log(`POST description ${type}`);
-		const sanitizedSdp = stripIceCandidatesFromSdp(sdp);
-		const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/description`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ type, sdp: sanitizedSdp })
-		});
-
-		if (!response.ok) {
-			throw await createApiError(response, 'Could not publish session description');
-		}
-	}
-
-	async function postIceCandidate(id: string, role: 'viewer' | 'phone', candidate: RTCIceCandidate) {
-		const payload = {
-			candidate: {
-				candidate: candidate.candidate,
-				sdpMid: candidate.sdpMid,
-				sdpMLineIndex: candidate.sdpMLineIndex,
-				usernameFragment: candidate.usernameFragment
-			},
-			role
-		};
-
-		await fetch(`/api/sessions/${encodeURIComponent(id)}/ice`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify(payload)
-		});
-	}
-
-	async function markSessionAsConnected(id: string) {
-		try {
-			session.log('POST connected');
-			await fetch(`/api/sessions/${encodeURIComponent(id)}/connected`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' }
-			});
-		} catch (err) {
-			console.error('Failed to mark session as connected:', err);
-			session.log(`POST connected failed: ${String(err)}`);
-		}
 	}
 
 	async function pollAnswer(id: string) {
@@ -229,9 +163,7 @@
 	async function pollIce(id: string) {
 		if (!peer) return;
 
-		const response = await fetch(
-			`/api/sessions/${encodeURIComponent(id)}/ice?for=viewer&after=${lastIceId}&limit=100`
-		);
+		const response = await fetchIceCandidatesForViewer(id, lastIceId, 100);
 		if (response.status === 404) {
 			status = 'Session expired. Create a new session.';
 			blurCode = true;
@@ -310,7 +242,10 @@
 		peer.onicecandidate = (event) => {
 			if (!event.candidate) return;
 			console.log(event.candidate);
-			void postIceCandidate(id, 'viewer', event.candidate);
+			void postViewerIceCandidate(id, event.candidate).catch((err) => {
+				console.error('Failed to publish viewer ICE candidate:', err);
+				session.log(`postIceCandidate failed: ${String(err)}`);
+			});
 		};
 
 		peer.onconnectionstatechange = () => {
@@ -323,7 +258,11 @@
 				status = 'Connected';
 				session.log('peer connected');
 				void session.setState('party', id);
-				void markSessionAsConnected(id);
+				session.log('POST connected');
+				void markSessionAsConnected(id).catch((err) => {
+					console.error('Failed to mark session as connected:', err);
+					session.log(`POST connected failed: ${String(err)}`);
+				});
 			} else if (peer.connectionState === 'failed') {
 				step = 'qr';
 				status = 'Disconnected';

@@ -2,6 +2,13 @@
 	import { onMount, onDestroy, createEventDispatcher } from 'svelte';
 	import { ClientSession } from '$lib/client-session';
 	import CountdownRing from '$lib/CountdownRing.svelte';
+	import {
+		createApiError,
+		postDescription,
+		postPhoneIceCandidate,
+		fetchIceCandidatesForPhone,
+		markSessionAsConnected
+	} from '$lib/webrtc/signaling-client';
 
 	const dispatch = createEventDispatcher<{ cancel: void }>();
 	let { sessionId = '' }: { sessionId: string } = $props();
@@ -136,28 +143,6 @@
 		}
 	}
 
-	async function createApiError(response: Response, fallbackMessage: string): Promise<Error> {
-		let message = fallbackMessage;
-
-		try {
-			const payload = (await response.json()) as { message?: unknown; retryAfterSeconds?: unknown };
-			if (typeof payload.message === 'string' && payload.message.trim()) {
-				message = payload.message.trim();
-			}
-
-			if (response.status === 429 && typeof payload.retryAfterSeconds === 'number') {
-				const seconds = Math.max(1, Math.floor(payload.retryAfterSeconds));
-				message = `${message} Retry in ${seconds}s.`;
-			}
-		} catch {
-			if (response.status === 429) {
-				message = 'Too many requests. Please wait a moment and try again.';
-			}
-		}
-
-		return new Error(message);
-	}
-
 	function isRateLimitError(error: unknown): boolean {
 		if (!(error instanceof Error)) {
 			return false;
@@ -214,12 +199,6 @@
 		return /^[23][0-9a-f]{0,3}:/i.test(normalized);
 	}
 
-	function stripIceCandidatesFromSdp(sdp: string): string {
-		return sdp
-			.replace(/^a=candidate:.*(?:\r?\n)?/gm, '')
-			.replace(/^a=end-of-candidates(?:\r?\n)?/gm, '');
-	}
-
 	function stopPeerConnection() {
 		clearSignalingTimer();
 		if (!peer) return;
@@ -264,6 +243,7 @@
 		}
 
 		try {
+			session.log('POST description answer');
 			await postDescription(sessionId, 'answer', peer.localDescription.sdp);
 		} catch (err) {
 			console.error('Failed to post answer:', err);
@@ -278,7 +258,7 @@
 		signalingStatus = 'Answer published. Connecting...';
 
 		for (const candidate of candidates) {
-			void postIceCandidate(sessionId, 'phone', candidate).catch((err) => {
+			void postPhoneIceCandidate(sessionId, candidate).catch((err) => {
 				console.error('Failed to publish phone ICE candidate:', err);
 				session.log(`postIceCandidate failed: ${String(err)}`);
 				if (err instanceof Error && isRateLimitError(err)) {
@@ -288,60 +268,6 @@
 		}
 
 		startIcePolling(sessionId);
-	}
-
-	async function postDescription(id: string, type: 'offer' | 'answer', sdp: string) {
-		session.log(`POST description ${type}`);
-		const sanitizedSdp = stripIceCandidatesFromSdp(sdp);
-		const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/description`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ type, sdp: sanitizedSdp })
-		});
-
-		if (!response.ok) {
-			throw await createApiError(response, 'Could not publish session description');
-		}
-	}
-
-	async function postIceCandidate(id: string, role: 'viewer' | 'phone', candidate: RTCIceCandidate) {
-		const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/ice`, {
-			method: 'POST',
-			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({
-				role,
-				candidate: {
-					candidate: candidate.candidate,
-					sdpMid: candidate.sdpMid,
-					sdpMLineIndex: candidate.sdpMLineIndex,
-					usernameFragment: candidate.usernameFragment
-				}
-			})
-		});
-
-		if (!response.ok) {
-			throw await createApiError(response, 'Could not publish ICE candidate');
-		}
-	}
-
-	async function markSessionAsConnected(id: string) {
-		try {
-			session.log('POST connected');
-			const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/connected`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' }
-			});
-
-			if (!response.ok) {
-				throw await createApiError(response, 'Could not mark session as connected');
-			}
-		} catch (err) {
-			console.error('Failed to mark session as connected:', err);
-			session.log(`POST connected failed: ${String(err)}`);
-			if (err instanceof Error && isRateLimitError(err)) {
-				signalingStatus = err.message;
-			}
-		}
 	}
 
 	async function fetchOffer(id: string): Promise<{ sdp: string } | null> {
@@ -371,9 +297,7 @@
 	async function pollViewerIce(id: string) {
 		if (!peer) return;
 
-		const response = await fetch(
-			`/api/sessions/${encodeURIComponent(id)}/ice?for=phone&after=${lastIceId}&limit=100`
-		);
+		const response = await fetchIceCandidatesForPhone(id, lastIceId, 100);
 		if (response.status === 404) {
 			signalingStatus = 'Session expired';
 			session.log('pollViewerIce: session not found (404)');
@@ -494,7 +418,14 @@
 				clearSignalingTimer();
 				session.log('peer connected');
 				void setPhoneState('party');
-				void markSessionAsConnected(sessionId);
+				session.log('POST connected');
+				void markSessionAsConnected(sessionId).catch((err) => {
+					console.error('Failed to mark session as connected:', err);
+					session.log(`POST connected failed: ${String(err)}`);
+					if (err instanceof Error && isRateLimitError(err)) {
+						signalingStatus = err.message;
+					}
+				});
 				resetIdleTimer();
 			} else if (peer.connectionState === 'failed') {
 				session.log('peer failed; ending phone stream');
