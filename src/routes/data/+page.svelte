@@ -1,6 +1,8 @@
 <script>
 	import Collapsible from '$lib/Collapsible.svelte';
 	import imgTraffic from '$lib/assets/data/traffic.webp';
+	import imgSessionPhone from '$lib/assets/data/phone-session.png';
+	import imgSessionViewer from '$lib/assets/data/viewer-session.png';
 </script>
 
 <svelte:head>
@@ -9,7 +11,7 @@
 
 <div class="page">
 	<div class="card">
-		<section class="data-hero mb-7">
+		<section class="hero mb-7">
 			<div class="grid gap-6">
 				<p class="eyebrow">Data details</p>
 				<h1>The data we handle</h1>
@@ -18,7 +20,7 @@
 					exchanging phone numbers.
 				</p>
 			</div>
-			<div class="data-visual" aria-hidden="true">
+			<div class="hero-visual" aria-hidden="true">
         <img src="{imgTraffic}" alt="Illustration of IPv6 connectivity" />
       </div>
 		</section>
@@ -34,6 +36,7 @@
 			To establish the connection, PeerLens briefly stores two types of technical data.
 		</p>
 
+		<a id="sdp" aria-hidden="true"></a>
 		<div class="subtle-card">
 			<div class="icon-chip" aria-hidden="true">
 				<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1" stroke-linejoin="round">
@@ -217,11 +220,15 @@
 					</Collapsible>
 				</div>
 				<p class="pt-3 mb-0">
+					You can access all SDP data inside of your session info modal, available by clicking on your session shorthand in the navbar.
+				</p>
+				<p class="pt-3 mb-0">
 					Check out <a class="link" href="https://webrtchacks.com/sdp-anatomy/" target="_blank" rel="noopener">https://webrtchacks.com/sdp-anatomy/</a> for a detailed breakdown of what all this means.
 				</p>
 			</div>
 		</div>
 
+		<a id="ice" aria-hidden="true"></a>
 		<div class="subtle-card">
 			<div class="icon-chip" aria-hidden="true">
 				<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
@@ -281,7 +288,8 @@
 			<div>
 				<h3>1) Viewer creates a session</h3>
 				<p>
-					A QR code is generated as a temporary invitation.
+					A QR code for your session is generated.<br>
+					We store your viewers <a class="link" href="#sdp">SDP data</a> and <a class="link" href="#ice">ICE candidates</a> so they can be relayed to the phone when it connects.
 				</p>
 			</div>
 		</div>
@@ -290,7 +298,8 @@
 			<div>
 				<h3>2) Phone joins the session</h3>
 				<p>
-					Scanning the QR code connects the phone to that session.
+					Scanning the QR code connects the phone to that session.<br>
+					The phone sends its own <a class="link" href="#sdp">SDP data</a> and <a class="link" href="#ice">ICE candidates</a> to PeerLens, which relays them to the viewer.
 				</p>
 			</div>
 		</div>
@@ -299,7 +308,7 @@
 			<div>
 				<h3>3) Devices exchange connection info</h3>
 				<p>
-					Both devices share session data and connection paths. ICE candidates are used to find a working route.
+					Both devices do the WebRTC magic and figure out how to connect to each other directly, using the relayed data.
 				</p>
 			</div>
 		</div>
@@ -308,7 +317,7 @@
 			<div>
 				<h3>4) Direct connection is established</h3>
 				<p>
-					Once a working path is found, the devices connect directly.
+					Once a working path is found, the phone switches to recording and the viewer to streaming mode.
 				</p>
 				<p class="mb-0">
 					From this point on, <strong>PeerLens is no longer part of the media path</strong>.
@@ -320,35 +329,20 @@
 			<div>
 				<h3>5) Cleanup</h3>
 				<p>
-					Temporary data is deleted when the session is removed or expires.
+					ICE candidates (meaning your local IPs) are deleted. The session data (including SDP data) remain as long as your session lasts.
 				</p>
 			</div>
 		</div>
 	</section>
+
+	<section class="card">
+		<h2 class="section-title">Can I see my data?</h2>
+		<p>
+			Yes! You can see all the data we have for your current session in the session info modal, available by clicking on your session shorthand in the navbar.
+		</p>
+		<div class="grid sm:grid-cols-2 gap-6 mt-6">
+			<img src="{imgSessionViewer}" class="rounded shadow border border-teal-900" alt="Screenshot of session info modal on viewer" />
+			<img src="{imgSessionPhone}" class="rounded shadow border border-teal-900" alt="Screenshot of session info modal on phone" />
+		</div>
+	</section>
 </div>
-
-<style>
-	.data-hero {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) minmax(240px, 1fr);
-		gap: 1.3rem;
-		overflow: hidden;
-	}
-
-	.data-visual {
-		display: grid;
-		place-items: center;
-	}
-
-	.data-visual img {
-		width: min(100%, 24rem);
-		height: auto;
-		filter: drop-shadow(0 1rem 1.8rem rgba(3, 76, 83, 0.2));
-	}
-
-	@media (max-width: 760px) {
-    .data-hero {
-			grid-template-columns: 1fr;
-		}
-	}
-</style>

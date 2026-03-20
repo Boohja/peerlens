@@ -2,16 +2,12 @@
 	import { onMount, tick } from 'svelte';
 	import QrReader from '$lib/phone/QrReader.svelte';
 	import CameraStream from '$lib/phone/CameraStream.svelte';
-	import {
-		appendSessionIdentityLog,
-		clearSessionIdentity,
-		getSessionIdentity,
-		setSessionIdentity
-	} from '$lib/session-identity';
+	import { ClientSession } from '$lib/client-session';
+	import { toast } from '$lib/toast';
 
 	type State =
 		| { kind: 'idle' }
-		| { kind: 'processing'; sessionId: string }
+		| { kind: 'processing' }
 		| { kind: 'scanning' }
 		| { kind: 'streaming'; sessionId: string };
 
@@ -19,40 +15,104 @@
 		typeof window !== 'undefined'
 			? new URLSearchParams(window.location.search).get('session') ?? ''
 			: '';
-	const storedIdentity = getSessionIdentity();
-	const initialSessionId = querySessionId || storedIdentity?.sessionId || '';
+	const session = new ClientSession('phone');
 
 	let phoneState: State = $state(
-		initialSessionId ? { kind: 'processing', sessionId: initialSessionId } : { kind: 'idle' }
+		querySessionId ? { kind: 'processing' } : { kind: 'idle' }
 	);
-	let scanError = $state('');
+	let lastScanContent = ''
+	let scanClearTimer: ReturnType<typeof setTimeout> | undefined;
+
+	async function startPhoneSession(
+		sessionId: string,
+		onFailureMessage?: string,
+		failureState: State = { kind: 'idle' }
+	) {
+		if (!sessionId) {
+			phoneState = failureState;
+			return;
+		}
+
+		phoneState = { kind: 'processing' };
+		session.setSessionId(sessionId);
+		session.log(`startPhoneSession: ${sessionId}`);
+
+		try {
+			session.log('GET session for validation');
+			const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+
+			if (!response.ok) {
+				session.log(`session validation failed: HTTP ${response.status}`);
+				session.clear(sessionId);
+				phoneState = failureState;
+				if (onFailureMessage && response.status !== 429) {
+					toast('error', onFailureMessage);
+				}
+				return;
+			}
+
+			const payload = (await response.json()) as { viewerState: string | null };
+			if (payload.viewerState === 'left') {
+				session.log('session validation failed: viewer left');
+				session.clear(sessionId);
+				phoneState = failureState;
+				if (onFailureMessage) {
+					toast('error', onFailureMessage);
+				}
+				return;
+			}
+
+			session.log(
+				`session validation passed; viewer_state=${payload.viewerState ?? 'null'}; start streaming`
+			);
+			phoneState = { kind: 'streaming', sessionId };
+		} catch {
+			session.log('session validation failed: network/error');
+			phoneState = failureState;
+		}
+	}
+
+	function resetScanClearTimer() {
+		clearTimeout(scanClearTimer);
+		scanClearTimer = setTimeout(() => {
+			lastScanContent = '';
+		}, 4000);
+	}
 
 	async function onScan(event: CustomEvent<string>) {
 		const scanned = event.detail;
-		scanError = '';
+		resetScanClearTimer();
+		if (scanned === lastScanContent) {
+			return;
+		}
+		let scanError = '';
+		lastScanContent = scanned;
 
 		try {
 			const url = new URL(scanned);
 			const sessionId = url.searchParams.get('session');
 
 			if (sessionId) {
-				appendSessionIdentityLog(`QR scan produced session: ${sessionId}`);
-				phoneState = { kind: 'streaming', sessionId };
+				session.log(`QR scan produced session: ${sessionId}`);
+				await startPhoneSession(sessionId, 'Session expired or unavailable. Keep scanning.', {
+					kind: 'scanning'
+				});
 			} else {
 				scanError = 'Not a valid PerLens Code - keep scanning.';
 			}
 		} catch {
 			scanError = 'Not a PerLens Code - keep scanning.';
 		}
+		if (scanError) {
+			toast('error', scanError);
+		}
 	}
 
 	function onScanError(event: CustomEvent<string>) {
-		scanError = event.detail;
 		phoneState = { kind: 'idle' };
 	}
 
 	async function startScanning() {
-		scanError = '';
 		if (phoneState.kind === 'scanning') {
 			phoneState = { kind: 'idle' };
 			await tick();
@@ -61,70 +121,29 @@
 	}
 
 	async function onStreamCancel() {
-		clearSessionIdentity();
+		session.clear();
 		await startScanning();
 	}
 
 	onMount(async () => {
+		session.clear();
+
 		if (phoneState.kind !== 'processing') return;
 
-		const { sessionId } = phoneState;
-
 		if (querySessionId) {
-			// Store in localStorage, replacing any outdated entry
-			setSessionIdentity(sessionId);
-			appendSessionIdentityLog(`session from URL: ${sessionId}`);
+			session.log(`session from URL: ${querySessionId}`);
 
 			// Strip ?session from URL without reloading
 			const url = new URL(window.location.href);
 			url.searchParams.delete('session');
 			history.replaceState({}, '', url.toString());
-			appendSessionIdentityLog('removed ?session from URL via history.replaceState');
-		}
+			session.log('removed ?session from URL via history.replaceState');
 
-		// Always validate the session against the server
-		try {
-			appendSessionIdentityLog('GET session for validation');
-			const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
-
-			if (!response.ok) {
-				// Session not found or server error — discard stale identity
-				appendSessionIdentityLog(`session validation failed: HTTP ${response.status}`);
-				clearSessionIdentity();
-				phoneState = { kind: 'idle' };
-				return;
-			}
-
-			const session = (await response.json()) as { viewerState: string | null };
-
-			if (session.viewerState === 'left') {
-				appendSessionIdentityLog('session validation: viewer_state is left; clearing local identity');
-				clearSessionIdentity();
-				phoneState = { kind: 'idle' };
-				return;
-			}
-
-			// offered → viewer is ready to answer; waiting → viewer expects an offer
-			appendSessionIdentityLog(
-				`session validation passed; viewer_state=${session.viewerState ?? 'null'}; start streaming`
-			);
-			phoneState = { kind: 'streaming', sessionId };
-		} catch {
-			appendSessionIdentityLog('session validation failed: network/error');
-			clearSessionIdentity();
-			phoneState = { kind: 'idle' };
-		}
-	});
-
-	$effect(() => {
-		if (phoneState.kind === 'streaming') {
-			setSessionIdentity(phoneState.sessionId);
+			await startPhoneSession(querySessionId, 'Session expired or unavailable. Please scan again.');
 			return;
 		}
 
-		if (phoneState.kind === 'idle') {
-			clearSessionIdentity();
-		}
+		phoneState = { kind: 'idle' };
 	});
 
 </script>
@@ -136,15 +155,15 @@
 
 <div class="content">
 	{#if phoneState.kind === 'idle'}
-		<section class="phone-landing">
-			<div class="card phone-hero">
+		<section>
+			<div class="card hero">
 				<div class="phone-copy">
 					<h1>Use your phone as the camera.</h1>
 					<p class="lede">
-						Open this page on your smartphone while the <a class="link" href="/viewer">viewer page</a> is open on different device.
+						Open this page on a device with a camera, while the <a class="link" href="/viewer">viewer page</a> is open on a different device.
 					</p>
 
-					<div class="step-list" aria-label="Phone flow overview">
+					<div aria-label="Phone flow overview">
 						<div class="subtle-card">
 							<div class="icon-chip icon-phone" aria-hidden="true">
 								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
@@ -158,7 +177,7 @@
 								Tap the button below and allow camera access if prompted.
 							</div>
 						</div>
-						<div class="step-card">
+						<div class="subtle-card">
 							<div class="icon-chip icon-phone" aria-hidden="true">
 								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1.5">
 									<path d="M3 6C3 4.58579 3 3.87868 3.43934 3.43934C3.87868 3 4.58579 3 6 3C7.41421 3 8.12132 3 8.56066 3.43934C9 3.87868 9 4.58579 9 6C9 7.41421 9 8.12132 8.56066 8.56066C8.12132 9 7.41421 9 6 9C4.58579 9 3.87868 9 3.43934 8.56066C3 8.12132 3 7.41421 3 6Z" />
@@ -174,7 +193,7 @@
 								<p>Point the camera at the code shown on the viewer screen.</p>
 							</div>
 						</div>
-						<div class="step-card">
+						<div class="subtle-card">
 							<div class="icon-chip icon-phone" aria-hidden="true">
 								<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 									<path d="M17 21C18.8692 21 19.8038 21 20.5 20.5981C20.9561 20.3348 21.3348 19.9561 21.5981 19.5C22 18.8038 22 17.8692 22 16C22 14.1308 22 13.1962 21.5981 12.5C21.3348 12.0439 20.9561 11.6652 20.5 11.4019C19.8038 11 18.8692 11 17 11H7C5.13077 11 4.19615 11 3.5 11.4019C3.04394 11.6652 2.66523 12.0439 2.40192 12.5C2 13.1962 2 14.1308 2 16C2 17.8692 2 18.8038 2.40192 19.5C2.66523 19.9561 3.04394 20.3348 3.5 20.5981C4.19615 21 5.13077 21 7 21H17Z" />
@@ -207,20 +226,13 @@
 			</div>
 		</section>
 
-		{#if scanError}
-			<p class="error">{scanError}</p>
-		{/if}
 	{:else if phoneState.kind === 'processing'}
 		<div class="card state-card">
 			<p>Processing...</p>
 		</div>
 	{:else if phoneState.kind === 'scanning'}
 		<div class="card state-card">
-			{#if scanError}
-				<p class="error">{scanError}</p>
-			{:else}
-				<p>Point your camera at the QR code on the viewer screen.</p>
-			{/if}
+			<p>Point your camera at the QR code on the viewer screen.</p>
 
 			<QrReader on:scan={onScan} on:error={onScanError} />
 
@@ -232,68 +244,9 @@
 </div>
 
 <style>
-	.phone-landing {
-		display: grid;
-	}
-
-	.phone-hero {
-		display: grid;
-		grid-template-columns: minmax(0, 1.2fr) minmax(250px, 0.8fr);
-		gap: 1.25rem;
-		overflow: hidden;
-		position: relative;
-	}
-
 	.phone-copy {
 		display: grid;
 		gap: 1rem;
-	}
-
-	.eyebrow {
-		font-size: 0.78rem;
-		font-weight: 700;
-		letter-spacing: 0.16em;
-		text-transform: uppercase;
-		opacity: 0.82;
-	}
-
-	h1 {
-		font-size: clamp(1.9rem, 5vw, 3rem);
-		line-height: 1.08;
-		max-width: 12ch;
-	}
-
-	.lede {
-		line-height: 1.6;
-		max-width: 48ch;
-		opacity: 0.9;
-	}
-
-	.step-list {
-		display: grid;
-		gap: 0.7rem;
-	}
-
-	.step-card {
-		display: grid;
-		grid-template-columns: auto 1fr;
-		gap: 0.75rem;
-		align-items: start;
-		padding: 0.75rem 0.9rem;
-		border-radius: 0.9rem;
-		border: 1px solid rgba(255, 255, 255, 0.2);
-		background: rgba(255, 255, 255, 0.12);
-	}
-
-	.step-card h2 {
-		font-size: 1rem;
-		margin-bottom: 0.2rem;
-	}
-
-	.step-card p {
-		margin: 0;
-		line-height: 1.4;
-		opacity: 0.9;
 	}
 
 	.phone-visual {
@@ -395,10 +348,6 @@
 	}
 
 	@media (max-width: 760px) {
-		.phone-hero {
-			grid-template-columns: 1fr;
-		}
-
 		.phone-visual {
 			order: -1;
 			min-height: 11rem;

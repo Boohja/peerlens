@@ -10,7 +10,7 @@
 
 <div class="page">
 	<div class="card">
-    <section class="privacy-hero mb-7">
+    <section class="hero mb-7">
       <div class="grid gap-6">
         <p class="eyebrow">Privacy</p>
         <h1>Your stream stays yours.</h1>
@@ -20,7 +20,7 @@
         </p>
       </div>
   
-      <div class="privacy-visual" aria-hidden="true">
+      <div class="hero-visual" aria-hidden="true">
         <img src="{imgLan}" alt="Illustration of a home with local Wi-Fi coverage" />
       </div>
     </section>
@@ -88,13 +88,27 @@
           <p>Your video stream is encrypted from your phone to the viewer.</p>
         </div>
       </div>
+			<div class="subtle-card">
+				<div class="icon-chip">
+					<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M17 17L21 21" />
+						<path d="M19 11C19 6.58172 15.4183 3 11 3C6.58172 3 3 6.58172 3 11C3 15.4183 6.58172 19 11 19C15.4183 19 19 15.4183 19 11Z" />
+						<path d="M8.99998 13.5C8.99998 13.5 6.5 11.6588 6.5 11C6.49999 10.3412 9 8.50002 9 8.50002" />
+						<path d="M13 13.5C13 13.5 15.5 11.6588 15.5 11C15.5 10.3412 13 8.5 13 8.5" />
+					</svg>
+				</div>
+        <div>
+          <h3>Complete transparency</h3>
+          <p>Check our <a class="link" href="/data">data section</a> or session data, we show you everything.</p>
+        </div>
+      </div>
     </div>
   </div>
 
 	<section class="card">
 		<h2 class="section-title">How it works in simple words</h2>
 
-    <div class="privacy-hero mb-4">
+    <div class="hero mb-4">
       <div class="self-center">
         <p>
           The PeerLens homepage simply creates a session that is used to negotiate a direct <a class="link" href="https://en.wikipedia.org/wiki/WebRTC" target="_blank" rel="noopener noreferrer">WebRTC connection</a> between your phone and viewer.
@@ -108,7 +122,7 @@
       </div>
     </div>
 
-    <div class="privacy-hero">
+    <div class="hero">
       <div class="self-center">
         <p>
           Once the session is established, your phone can stream video directly to the viewer without going through our PeerLens server.
@@ -161,25 +175,6 @@
 </div>
 
 <style>
-
-	.privacy-hero {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) minmax(240px, 1fr);
-		gap: 1.3rem;
-		overflow: hidden;
-	}
-
-	.privacy-visual {
-		display: grid;
-		place-items: center;
-	}
-
-	.privacy-visual img {
-		width: min(100%, 24rem);
-		height: auto;
-		filter: drop-shadow(0 1rem 1.8rem rgba(3, 76, 83, 0.2));
-	}
-
 	.safety-card {
 		display: grid;
 		gap: 0.6rem;
@@ -188,9 +183,6 @@
 	}
 
 	@media (max-width: 760px) {
-		.privacy-hero {
-			grid-template-columns: 1fr;
-		}
 		.safety-card {
 			grid-template-columns: 1fr;
 		}

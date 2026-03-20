@@ -1,12 +1,6 @@
 <script lang="ts">
-	import { onDestroy } from 'svelte';
-	import {
-		appendSessionIdentityLog,
-		clearSessionIdentity,
-		clearSessionIdentityForSession,
-		setSessionIdentity
-	} from '$lib/session-identity';
-	import { patchSessionRoleState } from '$lib/session-state';
+	import { onDestroy, onMount } from 'svelte';
+	import { ClientSession, tryRecoverSession } from '$lib/client-session';
 	import { toast } from '$lib/toast';
 	import { buildPhoneJoinUrl } from '$lib/webrtc/config';
 	import ViewerLanding from '$lib/viewer/ViewerLanding.svelte';
@@ -17,7 +11,6 @@
 
 	let sessionId = $state('');
 	let phoneJoinUrl = $state('');
-	let qrCodeUrl = $state('');
 	let status = $state('');
 	let previousStatus = $state('');
 	let blurCode = $state(false);
@@ -25,20 +18,13 @@
 	let videoFit = $state<'contain' | 'cover'>('contain');
 	let fullscreen = $state(false);
 	let remoteStream = $state<MediaStream | null>(null);
-	let qrModulePromise: Promise<typeof import('qrcode')> | null = null;
-
 	let peer: RTCPeerConnection | null = null;
 	let answerPollTimer: ReturnType<typeof setInterval> | null = null;
 	let icePollTimer: ReturnType<typeof setInterval> | null = null;
-	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 	let lastIceId = 0;
 	let pendingRemoteIce: RTCIceCandidateInit[] = [];
 	let viewerWasConnected = false;
-
-	async function setViewerState(id: string, nextState: 'offered' | 'waiting' | 'party' | 'left') {
-		appendSessionIdentityLog(`PATCH viewer_state -> ${nextState}`);
-		await patchSessionRoleState(id, 'viewer', nextState);
-	}
+	const session = new ClientSession('viewer');
 
 	async function flushPendingRemoteIce() {
 		if (!peer || !peer.currentRemoteDescription || pendingRemoteIce.length === 0) {
@@ -67,21 +53,6 @@
 			clearInterval(icePollTimer);
 			icePollTimer = null;
 		}
-
-		if (reconnectTimer) {
-			clearTimeout(reconnectTimer);
-			reconnectTimer = null;
-		}
-	}
-
-	async function toQrDataUrl(value: string) {
-		qrModulePromise ??= import('qrcode');
-		const { toDataURL } = await qrModulePromise;
-		return toDataURL(value, {
-			width: 320,
-			margin: 1,
-			errorCorrectionLevel: 'M'
-		});
 	}
 
 	function teardownPeer() {
@@ -110,17 +81,6 @@
 	$effect(() => {
 		if (step !== 'stream') fullscreen = false;
 	});
-
-	async function deleteSession(id: string) {
-		if (!id) return;
-
-		try {
-			appendSessionIdentityLog(`DELETE /api/sessions/${id}`);
-			await fetch(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' });
-		} catch {
-			// ignore best-effort cleanup failures
-		}
-	}
 
 	async function createApiError(response: Response, fallbackMessage: string): Promise<Error> {
 		let message = fallbackMessage;
@@ -152,15 +112,29 @@
 		return fallbackMessage;
 	}
 
+	function stripIceCandidatesFromSdp(sdp: string): string {
+		return sdp
+			.replace(/^a=candidate:.*(?:\r?\n)?/gm, '')
+			.replace(/^a=end-of-candidates(?:\r?\n)?/gm, '');
+	}
+
 	function handleRefreshSessionError(error: unknown) {
 		const message = getErrorMessage(error, 'Could not create a new session');
-		appendSessionIdentityLog(`refreshSession failed: ${message}`);
+		session.log(`refreshSession failed: ${message}`);
 		status = message;
 		toast('error', message);
 	}
 
+	function handleRecoverSessionError(error: unknown) {
+		const message = getErrorMessage(error, 'Could not recover the previous session');
+		session.log(`recoverSession failed: ${message}`);
+		status = message;
+		step = 'landing';
+		toast('error', message);
+	}
+
 	async function createSession(): Promise<string> {
-		appendSessionIdentityLog('POST /api/sessions');
+		session.log('POST /api/sessions');
 		const response = await fetch('/api/sessions', { method: 'POST' });
 		if (!response.ok) {
 			throw await createApiError(response, 'Could not create signaling session');
@@ -171,17 +145,18 @@
 			throw new Error('Invalid signaling session response');
 		}
 
-		appendSessionIdentityLog(`session created: ${payload.sessionId}`);
+		session.log(`session created: ${payload.sessionId}`);
 
 		return payload.sessionId;
 	}
 
 	async function postDescription(id: string, type: 'offer' | 'answer', sdp: string) {
-		appendSessionIdentityLog(`POST description ${type}`);
+		session.log(`POST description ${type}`);
+		const sanitizedSdp = stripIceCandidatesFromSdp(sdp);
 		const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/description`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ type, sdp })
+			body: JSON.stringify({ type, sdp: sanitizedSdp })
 		});
 
 		if (!response.ok) {
@@ -209,14 +184,14 @@
 
 	async function markSessionAsConnected(id: string) {
 		try {
-			appendSessionIdentityLog('POST connected');
+			session.log('POST connected');
 			await fetch(`/api/sessions/${encodeURIComponent(id)}/connected`, {
 				method: 'POST',
 				headers: { 'content-type': 'application/json' }
 			});
 		} catch (err) {
 			console.error('Failed to mark session as connected:', err);
-			appendSessionIdentityLog(`POST connected failed: ${String(err)}`);
+			session.log(`POST connected failed: ${String(err)}`);
 		}
 	}
 
@@ -228,8 +203,9 @@
 			status = 'Session expired. Create a new session.';
 			blurCode = true;
 			step = 'qr';
-			appendSessionIdentityLog('pollAnswer: session not found (404)');
-			clearSessionIdentityForSession(id);
+			session.log('pollAnswer: session not found (404)');
+			session.clear(id);
+			sessionId = '';
 			teardownPeer();
 			return;
 		}
@@ -246,7 +222,7 @@
 
 		await peer.setRemoteDescription({ type: payload.answer.type, sdp: payload.answer.sdp });
 		await flushPendingRemoteIce();
-		appendSessionIdentityLog('answer received and set as remote description');
+		session.log('answer received and set as remote description');
 		status = 'Answer received. Establishing stream...';
 	}
 
@@ -260,8 +236,9 @@
 			status = 'Session expired. Create a new session.';
 			blurCode = true;
 			step = 'qr';
-			appendSessionIdentityLog('pollIce: session not found (404)');
-			clearSessionIdentityForSession(id);
+			session.log('pollIce: session not found (404)');
+			session.clear(id);
+			sessionId = '';
 			teardownPeer();
 			return;
 		}
@@ -314,7 +291,7 @@
 
 		peer.ontrack = (event) => {
 			const [streamFromEvent] = event.streams;
-			appendSessionIdentityLog(
+			session.log(
 				`ontrack: kind=${event.track.kind}, readyState=${event.track.readyState}, streams=${event.streams.length}`
 			);
 
@@ -340,45 +317,28 @@
 			if (!peer) return;
 
 			if (peer.connectionState === 'connected') {
+				clearTimers();
 				viewerWasConnected = true;
-				if (reconnectTimer) {
-					clearTimeout(reconnectTimer);
-					reconnectTimer = null;
-				}
 				step = 'stream';
 				status = 'Connected';
-				appendSessionIdentityLog('peer connected');
-				void setViewerState(id, 'party');
+				session.log('peer connected');
+				void session.setState('party', id);
 				void markSessionAsConnected(id);
 			} else if (peer.connectionState === 'failed') {
 				step = 'qr';
 				status = 'Disconnected';
-				appendSessionIdentityLog('peer failed');
-				if (viewerWasConnected) {
-					viewerWasConnected = false;
-					void setViewerState(id, 'waiting');
-				}
+				session.log('peer failed');
+				viewerWasConnected = false;
 				// Immediately tear down and post a new offer so the phone can reconnect
 				teardownPeer();
 				void setupPeerConnection(sessionId).catch(console.error);
 			} else if (peer.connectionState === 'disconnected') {
 				step = 'qr';
 				status = 'Disconnected';
-				appendSessionIdentityLog('peer disconnected');
-				if (viewerWasConnected) {
-					viewerWasConnected = false;
-					void setViewerState(id, 'waiting');
-				}
-				// Give ICE a short window to self-recover before forcing a new offer
-				if (reconnectTimer) clearTimeout(reconnectTimer);
-				const capturedSessionId = sessionId;
-				reconnectTimer = setTimeout(() => {
-					reconnectTimer = null;
-					if (sessionId === capturedSessionId && sessionId) {
-						teardownPeer();
-						void setupPeerConnection(sessionId).catch(console.error);
-					}
-				}, 5000);
+				session.log('peer disconnected');
+				viewerWasConnected = false;
+				teardownPeer();
+				void setupPeerConnection(sessionId).catch(console.error);
 			}
 		};
 
@@ -390,7 +350,7 @@
 		}
 
 		await postDescription(id, 'offer', peer.localDescription.sdp);
-		void setViewerState(id, 'offered');
+		void session.setState('offered', id);
 		viewerWasConnected = false;
 		step = 'qr';
 		status = 'Waiting for phone to scan code...';
@@ -403,38 +363,58 @@
 		fullscreen = false;
 		teardownPeer();
 		if (previousSessionId) {
-			void setViewerState(previousSessionId, 'left');
-			void deleteSession(previousSessionId);
+			await session.destroy(previousSessionId);
 		}
 
 		status = 'Creating session...';
 		sessionId = await createSession();
-		setSessionIdentity(sessionId);
-		appendSessionIdentityLog(`set local session identity: ${sessionId}`);
+		session.setSessionId(sessionId);
+		session.log(`set local session identity: ${sessionId}`);
 		const origin = window.location.origin;
 		phoneJoinUrl = buildPhoneJoinUrl(sessionId, origin);
-		qrCodeUrl = '';
-		void toQrDataUrl(phoneJoinUrl)
-			.then((value) => {
-				qrCodeUrl = value;
-			})
-			.catch((err) => {
-				console.error(err);
-			});
 		blurCode = false;
 
 		await setupPeerConnection(sessionId);
 	}
 
+	onMount(async () => {
+		session.log('tryRecoverSession');
+		const recovery = await tryRecoverSession();
+		if (!recovery.ok) {
+			if (recovery.reason === 'not-found') {
+				session.log('session recovery failed: session not found');
+			} else if (recovery.reason === 'viewer-left') {
+				session.log('session recovery failed: viewer left');
+			} else if (recovery.reason === 'request-failed') {
+				session.log(
+					`session recovery failed: request failed${recovery.status ? ` (HTTP ${recovery.status})` : ''}`
+				);
+			}
+			return;
+		}
+
+		try {
+			sessionId = recovery.session.sessionId;
+			session.log(
+				`session recovery passed; viewer_state=${recovery.session.viewerState ?? 'null'}; restore viewer`
+			);
+			const origin = window.location.origin;
+			phoneJoinUrl = buildPhoneJoinUrl(sessionId, origin);
+			blurCode = false;
+			step = 'qr';
+			status = 'Restoring session...';
+
+			await setupPeerConnection(sessionId);
+		} catch (error) {
+			handleRecoverSessionError(error);
+		}
+	});
+
 	onDestroy(() => {
 		const currentSessionId = sessionId;
 		teardownPeer();
 		viewerWasConnected = false;
-		clearSessionIdentity();
-		if (currentSessionId) {
-			void setViewerState(currentSessionId, 'left');
-			void deleteSession(currentSessionId);
-		}
+		void session.destroy(currentSessionId);
 	});
 </script>
 
@@ -449,11 +429,20 @@
 		<ViewerLanding on:start={() => void refreshSession().catch(handleRefreshSessionError)} />
 	{:else if step === 'qr'}
 		<ViewerQrPanel
-			{qrCodeUrl}
 			{phoneJoinUrl}
 			{status}
 			{blurCode}
 			on:renew={() => void refreshSession().catch(handleRefreshSessionError)}
+			on:cancel={async () => {
+				teardownPeer();
+				viewerWasConnected = false;
+				await session.destroy(sessionId);
+				sessionId = '';
+				phoneJoinUrl = '';
+				status = '';
+				blurCode = false;
+				step = 'landing';
+			}}
 		/>
 	{:else if step === 'stream'}
 		<ViewerStream
