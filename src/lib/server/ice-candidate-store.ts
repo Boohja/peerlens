@@ -22,6 +22,10 @@ export async function addIceCandidate(
 		throw new Error('Session not found');
 	}
 
+	if (session.connectedAt != null) {
+		return 0;
+	}
+
 	const candidateJson = JSON.stringify(candidate);
 
 	const result = await signalingClient.execute({
@@ -80,6 +84,10 @@ export async function getIceCandidatesForPeer(
 
 	const session = await getSession(sessionId);
 	if (!session?.offer) {
+		return [];
+	}
+
+	if (session.connectedAt != null) {
 		return [];
 	}
 

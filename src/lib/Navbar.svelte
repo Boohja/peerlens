@@ -1,4 +1,5 @@
 <script lang="ts">
+	import Collapsible from '$lib/Collapsible.svelte';
 	import { sessionIdentity } from '$lib/session-identity';
 
 	type SessionInfoResponse = {
@@ -143,33 +144,42 @@
 						<dd>{formatUnixTimestamp(sessionInfo.connectedAt)}</dd>
 					</div>
 				</dl>
+
+				<Collapsible title="Session offer SDP">
+					<div class="code">{sessionInfo.offer?.sdp ?? 'No offer SDP available.'}</div>
+				</Collapsible>
+
+				<Collapsible title="Session answer SDP">
+					<div class="code">{sessionInfo.answer?.sdp ?? 'No answer SDP available.'}</div>
+				</Collapsible>
 			{/if}
 
-			<h3 class="session-log-title">Local session log</h3>
-			<div class="session-log-table-wrap">
-				<table class="session-log-table">
-					<thead>
-						<tr>
-							<th scope="col">Time</th>
-							<th scope="col">Message</th>
-						</tr>
-					</thead>
-					<tbody>
-						{#if $sessionIdentity?.log.length}
-							{#each [...$sessionIdentity.log].reverse() as entry}
-								<tr>
-									<td>{entry.datetime}</td>
-									<td>{entry.message}</td>
-								</tr>
-							{/each}
-						{:else}
+			<Collapsible title="Local session log">
+				<div class="session-log-table-wrap">
+					<table class="session-log-table">
+						<thead>
 							<tr>
-								<td colspan="2">No local log entries yet.</td>
+								<th scope="col">Time</th>
+								<th scope="col">Message</th>
 							</tr>
-						{/if}
-					</tbody>
-				</table>
-			</div>
+						</thead>
+						<tbody>
+							{#if $sessionIdentity?.log.length}
+								{#each [...$sessionIdentity.log].reverse() as entry}
+									<tr>
+										<td>{entry.datetime}</td>
+										<td>{entry.message}</td>
+									</tr>
+								{/each}
+							{:else}
+								<tr>
+									<td colspan="2">No local log entries yet.</td>
+								</tr>
+							{/if}
+						</tbody>
+					</table>
+				</div>
+			</Collapsible>
 		</div>
 	</div>
 {/if}
