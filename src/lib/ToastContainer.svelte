@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { fade, fly } from 'svelte/transition';
 	import { flip } from 'svelte/animate';
+	import CountdownRing from '$lib/CountdownRing.svelte';
 	import { dismissToast, toasts } from '$lib/toast';
 </script>
 
@@ -10,22 +11,18 @@
 			{#each $toasts as toast (toast.id)}
 				<article
 					class={`toast toast--${toast.variant}`}
-					in:fly={{ y: 14, duration: 150 }}
-					out:fade={{ duration: 130 }}
+					in:fly|global={{ x: 36, duration: 180, opacity: 0.35 }}
+					out:fade|global={{ duration: 130 }}
 					animate:flip={{ duration: 170 }}
 				>
 					<p class="toast-text">{toast.text}</p>
 					<button
 						type="button"
 						class="toast-timer"
-						style={`--toast-duration: ${toast.durationMs}ms;`}
 						onclick={() => dismissToast(toast.id)}
 						aria-label="Dismiss notification"
 					>
-						<svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
-							<circle class="timer-track" cx="10" cy="10" r="8" />
-							<circle class="timer-progress" cx="10" cy="10" r="8" />
-						</svg>
+						<CountdownRing durationMs={toast.durationMs} />
 					</button>
 				</article>
 			{/each}
@@ -58,24 +55,27 @@
 		border-radius: 0.5rem;
 		border: 1px solid;
 		pointer-events: auto;
+		box-shadow: 1px 1px 6px 1px #000000;
+		backdrop-filter: blur(8.9px);
+		-webkit-backdrop-filter: blur(6.9px);
 	}
 
 	.toast--success {
-		background: var(--viewer-bg-soft);
-		border-color: var(--viewer-bg);
-		color: var(--primary);
+		background: rgba(69, 122, 69, 0.342);
+		border-color: rgba(69, 122, 69, 0.342);
+		color: #013d01;
 	}
 
 	.toast--warning {
-		background: var(--phone-bg-soft);
-		border-color: var(--phone-bg);
-		color: var(--primary);
+		background: rgb(207 198 67 / 58%);
+		border-color: rgb(207 198 67 / 58%);
+		color: rgb(57 57 3);
 	}
 
 	.toast--error {
-		background: var(--primary);
-		border-color: var(--primary);
-		color: white;
+		background: rgba(255, 0, 0, 0.48);
+		border: 1px solid rgba(255, 0, 0, 0.33);
+		color: rgb(77, 1, 1);
 	}
 
 	.toast-text {
@@ -102,39 +102,4 @@
 		opacity: 1;
 	}
 
-	.toast-timer svg {
-		width: 100%;
-		height: 100%;
-	}
-
-	.timer-track,
-	.timer-progress {
-		fill: none;
-		stroke-width: 2;
-	}
-
-	.timer-track {
-		stroke: currentColor;
-		opacity: 0.22;
-	}
-
-	.timer-progress {
-		stroke: currentColor;
-		stroke-linecap: round;
-		transform: rotate(-90deg);
-		transform-origin: 10px 10px;
-		stroke-dasharray: 50.265;
-		stroke-dashoffset: 0;
-		animation: countdown var(--toast-duration) linear forwards;
-	}
-
-	@keyframes countdown {
-		from {
-			stroke-dashoffset: 0;
-		}
-
-		to {
-			stroke-dashoffset: 50.265;
-		}
-	}
 </style>
