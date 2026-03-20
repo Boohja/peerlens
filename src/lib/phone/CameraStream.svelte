@@ -2,13 +2,7 @@
 	import { onMount, onDestroy, createEventDispatcher } from 'svelte';
 	import { ClientSession } from '$lib/client-session';
 	import CountdownRing from '$lib/CountdownRing.svelte';
-	import {
-		createApiError,
-		postDescription,
-		postPhoneIceCandidate,
-		fetchIceCandidatesForPhone,
-		markSessionAsConnected
-	} from '$lib/webrtc/signaling-client';
+	import { PhoneRtcManager } from '$lib/phone/PhoneRtcManager';
 
 	const dispatch = createEventDispatcher<{ cancel: void }>();
 	let { sessionId = '' }: { sessionId: string } = $props();
@@ -21,14 +15,6 @@
 	let loadingCameras = $state(false);
 	let cameras = $state<MediaDeviceInfo[]>([]);
 	let selectedCameraId = $state('');
-
-	let peer: RTCPeerConnection | null = null;
-	let icePollTimer: ReturnType<typeof setInterval> | null = null;
-	let lastIceId = 0;
-	let phonePublishedAnswer = false;
-	let gatheredLocalCandidates: RTCIceCandidate[] = [];
-	let rejectedPublicIpv6Candidates: RTCIceCandidate[] = [];
-	let publicIpv6PromptHandled = false;
 	let showIpv6FallbackModal = $state(false);
 
 	let idleOverlay = $state(false);
@@ -36,17 +22,32 @@
 	let idleTimerVisualKey = $state(0);
 	const IDLE_TIMEOUT_MS = 10_000;
 	const session = new ClientSession('phone');
+	const rtcManager = new PhoneRtcManager({
+		session,
+		getSessionId: () => sessionId,
+		onStatusChange: (nextStatus) => {
+			signalingStatus = nextStatus;
+		},
+		onErrorChange: (nextError) => {
+			error = nextError;
+		},
+		onShowIpv6FallbackChange: (show) => {
+			showIpv6FallbackModal = show;
+		},
+		onConnected: () => {
+			resetIdleTimer();
+		},
+		onPeerDisconnected: () => {
+			stopCamera();
+			dispatch('cancel');
+		}
+	});
 
 	$effect(() => {
 		if (sessionId) {
 			session.setSessionId(sessionId);
 		}
 	});
-
-	async function setPhoneState(nextState: 'waiting' | 'party') {
-		if (!sessionId) return;
-		await session.setState(nextState, sessionId);
-	}
 
 	function wakeFromIdle(event: PointerEvent) {
 		event.preventDefault();
@@ -136,321 +137,17 @@
 		}
 	}
 
-	function clearSignalingTimer() {
-		if (icePollTimer) {
-			clearInterval(icePollTimer);
-			icePollTimer = null;
-		}
-	}
-
-	function isRateLimitError(error: unknown): boolean {
-		if (!(error instanceof Error)) {
-			return false;
-		}
-
-		return /too many requests|retry in/i.test(error.message);
-	}
-
-	function extractCandidateAddress(candidateLine: string): string | null {
-		const parts = candidateLine.trim().split(/\s+/);
-		if (parts.length < 6) return null;
-		return parts[4] ?? null;
-	}
-
-	function isPrivateIpv4Address(address: string): boolean {
-		const match = address.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-		if (!match) return false;
-
-		const octets = match.slice(1).map((part) => Number(part));
-		if (octets.some((part) => Number.isNaN(part) || part < 0 || part > 255)) return false;
-
-		const [first, second] = octets;
-		if (first === 10) return true;
-		if (first === 192 && second === 168) return true;
-		if (first === 172 && second >= 16 && second <= 31) return true;
-		if (first === 169 && second === 254) return true;
-
-		return false;
-	}
-
-	function isLocalAddress(address: string): boolean {
-		const normalized = address.toLowerCase();
-
-		if (normalized === 'localhost' || normalized === '::1' || normalized.endsWith('.local')) {
-			return true;
-		}
-
-		if (isPrivateIpv4Address(normalized)) {
-			return true;
-		}
-
-		if (normalized.includes(':')) {
-			if (normalized.startsWith('fe80:')) return true;
-			if (/^f[c-d][0-9a-f]{0,2}:/i.test(normalized)) return true;
-		}
-
-		return false;
-	}
-
-	function isPublicIpv6Address(address: string): boolean {
-		const normalized = address.toLowerCase();
-		if (!normalized.includes(':')) return false;
-		if (isLocalAddress(normalized)) return false;
-		return /^[23][0-9a-f]{0,3}:/i.test(normalized);
-	}
-
-	function stopPeerConnection() {
-		clearSignalingTimer();
-		if (!peer) return;
-
-		peer.onicecandidate = null;
-		peer.onconnectionstatechange = null;
-		peer.close();
-		peer = null;
-		lastIceId = 0;
-	}
-
 	function openImplicationsPage() {
 		window.open('/ipv6', '_blank', 'noopener,noreferrer');
 	}
 
 	function stopForRejectedIpv6Fallback() {
-		session.log('user rejected public IPv6 fallback candidate; stopping phone stream');
-		error = 'Connection stopped because only public IPv6 was available and not approved.';
-		signalingStatus = 'Stopped';
-		showIpv6FallbackModal = false;
+		rtcManager.rejectIpv6FallbackCandidate();
 		stopCamera();
 	}
 
 	function confirmIpv6FallbackCandidate() {
-		const fallbackCandidate = rejectedPublicIpv6Candidates[0];
-		if (!fallbackCandidate) {
-			showIpv6FallbackModal = false;
-			stopForRejectedIpv6Fallback();
-			return;
-		}
-
-		session.log('user accepted public IPv6 fallback candidate');
-		signalingStatus = 'Connecting (public IPv6 fallback approved)...';
-		showIpv6FallbackModal = false;
-		void publishAnswerAndCandidates([fallbackCandidate]);
-	}
-
-	async function publishAnswerAndCandidates(candidates: RTCIceCandidate[]) {
-		if (!peer?.localDescription?.sdp) {
-			session.log('publishAnswerAndCandidates: missing local SDP');
-			return;
-		}
-
-		try {
-			session.log('POST description answer');
-			await postDescription(sessionId, 'answer', peer.localDescription.sdp);
-		} catch (err) {
-			console.error('Failed to post answer:', err);
-			session.log(`postDescription failed: ${String(err)}`);
-			signalingStatus = err instanceof Error ? err.message : 'Could not publish answer';
-			return;
-		}
-
-		phonePublishedAnswer = true;
-		void setPhoneState('waiting');
-		session.log('answer published; waiting for connection');
-		signalingStatus = 'Answer published. Connecting...';
-
-		for (const candidate of candidates) {
-			void postPhoneIceCandidate(sessionId, candidate).catch((err) => {
-				console.error('Failed to publish phone ICE candidate:', err);
-				session.log(`postIceCandidate failed: ${String(err)}`);
-				if (err instanceof Error && isRateLimitError(err)) {
-					signalingStatus = err.message;
-				}
-			});
-		}
-
-		startIcePolling(sessionId);
-	}
-
-	async function fetchOffer(id: string): Promise<{ sdp: string } | null> {
-		const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/description`);
-
-		if (response.status === 404) {
-			throw new Error('Session expired or missing');
-		}
-
-		if (response.status === 429) {
-			throw await createApiError(response, 'Too many requests while waiting for viewer offer');
-		}
-
-		if (!response.ok) {
-			return null;
-		}
-
-		const payload = (await response.json()) as {
-			offer: { type: 'offer'; sdp: string } | null;
-		};
-
-		const sdp = payload.offer?.sdp || null;
-		if (!sdp) return null;
-		return { sdp };
-	}
-
-	async function pollViewerIce(id: string) {
-		if (!peer) return;
-
-		const response = await fetchIceCandidatesForPhone(id, lastIceId, 100);
-		if (response.status === 404) {
-			signalingStatus = 'Session expired';
-			session.log('pollViewerIce: session not found (404)');
-			session.clear(id);
-			stopPeerConnection();
-			return;
-		}
-
-		if (response.status === 429) {
-			const err = await createApiError(response, 'Too many requests while syncing ICE');
-			signalingStatus = err.message;
-			session.log(`pollViewerIce: rate limited (${err.message})`);
-			return;
-		}
-
-		if (!response.ok) {
-			return;
-		}
-
-		const payload = (await response.json()) as {
-			candidates: Array<{ candidate: RTCIceCandidateInit | null }>;
-			nextAfter: number;
-		};
-
-		for (const item of payload.candidates) {
-			if (!item.candidate) continue;
-			await peer.addIceCandidate(item.candidate);
-		}
-
-		lastIceId = payload.nextAfter;
-	}
-
-	function startIcePolling(id: string) {
-		clearSignalingTimer();
-		icePollTimer = setInterval(() => {
-			void pollViewerIce(id);
-		}, 800);
-	}
-
-	async function waitForOffer(id: string, timeoutMs = 30000): Promise<{ sdp: string }> {
-		const start = Date.now();
-
-		while (Date.now() - start < timeoutMs) {
-			const result = await fetchOffer(id);
-			if (result) {
-				return result;
-			}
-
-			await new Promise((resolve) => setTimeout(resolve, 700));
-		}
-
-		throw new Error('Timed out waiting for viewer offer');
-	}
-
-	async function startSignaling(mediaStream: MediaStream) {
-		if (!sessionId) return;
-
-		stopPeerConnection();
-		phonePublishedAnswer = false;
-		gatheredLocalCandidates = [];
-		rejectedPublicIpv6Candidates = [];
-		publicIpv6PromptHandled = false;
-		showIpv6FallbackModal = false;
-		signalingStatus = 'Waiting for viewer offer...';
-		session.log('start signaling');
-
-		const { sdp: offerSdp } = await waitForOffer(sessionId);
-		peer = new RTCPeerConnection({ iceServers: [] });
-		lastIceId = 0;
-
-		for (const track of mediaStream.getTracks()) {
-			peer.addTrack(track, mediaStream);
-		}
-
-		peer.onicecandidate = (event) => {
-			if (!event.candidate) {
-				if (publicIpv6PromptHandled) return;
-
-				if (gatheredLocalCandidates.length > 0) {
-					void publishAnswerAndCandidates(gatheredLocalCandidates);
-				} else if (rejectedPublicIpv6Candidates.length > 0) {
-					publicIpv6PromptHandled = true;
-					signalingStatus = 'Public IPv6 found. Waiting for your decision...';
-					showIpv6FallbackModal = true;
-				} else {
-					signalingStatus = 'No local address found.';
-					error = 'Could not find any local network address to use for the connection.';
-				}
-
-				return;
-			}
-
-			const address = extractCandidateAddress(event.candidate.candidate);
-			if (!address) {
-				session.log('rejected ICE candidate: unable to parse address');
-				return;
-			}
-
-			if (isLocalAddress(address)) {
-				gatheredLocalCandidates.push(event.candidate);
-				return;
-			}
-
-			if (isPublicIpv6Address(address)) {
-				rejectedPublicIpv6Candidates.push(event.candidate);
-				session.log(`rejected public IPv6 ICE candidate (${address})`);
-				return;
-			}
-
-			session.log(`rejected non-local ICE candidate (${address})`);
-		};
-
-		peer.onconnectionstatechange = () => {
-			if (!peer) return;
-
-			if (peer.connectionState === 'connected') {
-				signalingStatus = 'Connected';
-				clearSignalingTimer();
-				session.log('peer connected');
-				void setPhoneState('party');
-				session.log('POST connected');
-				void markSessionAsConnected(sessionId).catch((err) => {
-					console.error('Failed to mark session as connected:', err);
-					session.log(`POST connected failed: ${String(err)}`);
-					if (err instanceof Error && isRateLimitError(err)) {
-						signalingStatus = err.message;
-					}
-				});
-				resetIdleTimer();
-			} else if (peer.connectionState === 'failed') {
-				session.log('peer failed; ending phone stream');
-				signalingStatus = 'Disconnected';
-				stopCamera();
-				dispatch('cancel');
-			} else if (peer.connectionState === 'disconnected') {
-				session.log('peer disconnected; ending phone stream');
-				signalingStatus = 'Disconnected';
-				stopCamera();
-				dispatch('cancel');
-			}
-		};
-
-		await peer.setRemoteDescription({ type: 'offer', sdp: offerSdp });
-		const answer = await peer.createAnswer();
-		await peer.setLocalDescription(answer);
-
-		if (!peer.localDescription?.sdp) {
-			throw new Error('Missing local answer SDP');
-		}
-
-		signalingStatus = 'Gathering local addresses...';
-		session.log('local description set; gathering ICE candidates');
-		// Answer and candidates are published from onicecandidate once gathering completes
+		rtcManager.confirmIpv6FallbackCandidate();
 	}
 
 	async function loadCameras(preferredDeviceId = '') {
@@ -496,7 +193,7 @@
 			await loadCameras(activeId);
 
 			if (sessionId) {
-				await startSignaling(stream);
+				await rtcManager.start(stream);
 			} else {
 				signalingStatus = 'Missing session';
 				session.log('missing session id while starting signaling');
@@ -539,14 +236,7 @@
 				throw new Error('No video track available for selected camera');
 			}
 
-			if (peer) {
-				const videoSender = peer.getSenders().find((sender) => sender.track?.kind === 'video');
-				if (videoSender) {
-					await videoSender.replaceTrack(nextTrack);
-				} else {
-					peer.addTrack(nextTrack, nextStream);
-				}
-			}
+			await rtcManager.replaceVideoTrack(nextTrack, nextStream);
 
 			stream = nextStream;
 			videoEl.srcObject = nextStream;
@@ -559,18 +249,18 @@
 			const activeId = nextTrack.getSettings().deviceId ?? '';
 			await loadCameras(activeId);
 
-			signalingStatus = peer?.connectionState === 'connected' ? 'Connected' : 'Connecting...';
+			signalingStatus =
+				rtcManager.getConnectionState() === 'connected' ? 'Connected' : 'Connecting...';
 		} catch (err) {
 			console.error(err);
 			setCameraError(err);
-			signalingStatus = peer?.connectionState === 'connected' ? 'Connected' : 'Not connected';
+			signalingStatus =
+				rtcManager.getConnectionState() === 'connected' ? 'Connected' : 'Not connected';
 		}
 	}
 
 	function stopCamera() {
-		stopPeerConnection();
-		phonePublishedAnswer = false;
-		showIpv6FallbackModal = false;
+		rtcManager.stop();
 		clearIdleTimer();
 		signalingStatus = 'Stopped';
 		if (stream) {

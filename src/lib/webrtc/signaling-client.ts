@@ -38,7 +38,7 @@ export function stripIceCandidatesFromSdp(sdp: string): string {
 		.replaceAll(/^a=end-of-candidates(?:\r?\n)?/gm, '');
 }
 
-export async function postDescription(id: string, type: 'offer' | 'answer', sdp: string) {
+export async function postDescription(id: string, type: 'offer' | 'answer', sdp: string): Promise<void> {
 	const sanitizedSdp = stripIceCandidatesFromSdp(sdp);
 	const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/description`, {
 		method: 'POST',
@@ -71,23 +71,23 @@ async function postRoleIceCandidate(id: string, role: SignalingRole, candidate: 
 	}
 }
 
-export async function postViewerIceCandidate(id: string, candidate: RTCIceCandidate) {
-	await postRoleIceCandidate(id, 'viewer', candidate);
+export function postViewerIceCandidate(id: string, candidate: RTCIceCandidate): Promise<void> {
+	return postRoleIceCandidate(id, 'viewer', candidate);
 }
 
-export async function postPhoneIceCandidate(id: string, candidate: RTCIceCandidate) {
-	await postRoleIceCandidate(id, 'phone', candidate);
+export function postPhoneIceCandidate(id: string, candidate: RTCIceCandidate): Promise<void> {
+	return postRoleIceCandidate(id, 'phone', candidate);
 }
 
-export async function fetchIceCandidatesForViewer(id: string, after: number, limit = 100): Promise<Response> {
+export function fetchIceCandidatesForViewer(id: string, after: number, limit = 100): Promise<Response> {
 	return fetch(buildIcePollUrl(id, 'viewer', after, limit));
 }
 
-export async function fetchIceCandidatesForPhone(id: string, after: number, limit = 100): Promise<Response> {
+export function fetchIceCandidatesForPhone(id: string, after: number, limit = 100): Promise<Response> {
 	return fetch(buildIcePollUrl(id, 'phone', after, limit));
 }
 
-export async function markSessionAsConnected(id: string) {
+export async function markSessionAsConnected(id: string): Promise<void> {
 	const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/connected`, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json' }

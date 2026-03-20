@@ -3,13 +3,8 @@
 	import { ClientSession, tryRecoverSession } from '$lib/client-session';
 	import { toast } from '$lib/toast';
 	import { buildPhoneJoinUrl } from '$lib/webrtc/config';
-	import {
-		createApiError,
-		postDescription,
-		postViewerIceCandidate,
-		fetchIceCandidatesForViewer,
-		markSessionAsConnected
-	} from '$lib/webrtc/signaling-client';
+	import { createApiError } from '$lib/webrtc/signaling-client';
+	import { ViewerRtcManager } from '$lib/viewer/ViewerRtcManager';
 	import ViewerLanding from '$lib/viewer/ViewerLanding.svelte';
 	import ViewerQrPanel from '$lib/viewer/ViewerQrPanel.svelte';
 	import ViewerStream from '$lib/viewer/ViewerStream.svelte';
@@ -25,57 +20,26 @@
 	let videoFit = $state<'contain' | 'cover'>('contain');
 	let fullscreen = $state(false);
 	let remoteStream = $state<MediaStream | null>(null);
-	let peer: RTCPeerConnection | null = null;
-	let answerPollTimer: ReturnType<typeof setInterval> | null = null;
-	let icePollTimer: ReturnType<typeof setInterval> | null = null;
-	let lastIceId = 0;
-	let pendingRemoteIce: RTCIceCandidateInit[] = [];
-	let viewerWasConnected = false;
 	const session = new ClientSession('viewer');
-
-	async function flushPendingRemoteIce() {
-		if (!peer || !peer.currentRemoteDescription || pendingRemoteIce.length === 0) {
-			return;
+	const rtcManager = new ViewerRtcManager({
+		session,
+		getSessionId: () => sessionId,
+		onStatusChange: (nextStatus) => {
+			status = nextStatus;
+		},
+		onStepChange: (nextStep) => {
+			step = nextStep;
+		},
+		onBlurCodeChange: (blur) => {
+			blurCode = blur;
+		},
+		onRemoteStreamChange: (stream) => {
+			remoteStream = stream;
+		},
+		onSessionInvalidated: () => {
+			sessionId = '';
 		}
-
-		const queued = pendingRemoteIce;
-		pendingRemoteIce = [];
-
-		for (const candidate of queued) {
-			try {
-				await peer.addIceCandidate(candidate);
-			} catch (err) {
-				console.error('Failed to add queued ICE candidate:', err);
-			}
-		}
-	}
-
-	function clearTimers() {
-		if (answerPollTimer) {
-			clearInterval(answerPollTimer);
-			answerPollTimer = null;
-		}
-
-		if (icePollTimer) {
-			clearInterval(icePollTimer);
-			icePollTimer = null;
-		}
-	}
-
-	function teardownPeer() {
-		clearTimers();
-		pendingRemoteIce = [];
-
-		if (peer) {
-			peer.onicecandidate = null;
-			peer.ontrack = null;
-			peer.onconnectionstatechange = null;
-			peer.close();
-			peer = null;
-		}
-
-		remoteStream = null;
-	}
+	});
 
 	$effect(() => {
 		if (status === 'Disconnected' && previousStatus !== 'Disconnected') {
@@ -129,178 +93,11 @@
 		return payload.sessionId;
 	}
 
-	async function pollAnswer(id: string) {
-		if (!peer) return;
-
-		const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/description`);
-		if (response.status === 404) {
-			status = 'Session expired. Create a new session.';
-			blurCode = true;
-			step = 'qr';
-			session.log('pollAnswer: session not found (404)');
-			session.clear(id);
-			sessionId = '';
-			teardownPeer();
-			return;
-		}
-
-		if (!response.ok) return;
-
-		const payload = (await response.json()) as {
-			answer: { type: 'answer'; sdp: string } | null;
-		};
-
-		if (!payload.answer || !peer || peer.currentRemoteDescription) {
-			return;
-		}
-
-		await peer.setRemoteDescription({ type: payload.answer.type, sdp: payload.answer.sdp });
-		await flushPendingRemoteIce();
-		session.log('answer received and set as remote description');
-		status = 'Answer received. Establishing stream...';
-	}
-
-	async function pollIce(id: string) {
-		if (!peer) return;
-
-		const response = await fetchIceCandidatesForViewer(id, lastIceId, 100);
-		if (response.status === 404) {
-			status = 'Session expired. Create a new session.';
-			blurCode = true;
-			step = 'qr';
-			session.log('pollIce: session not found (404)');
-			session.clear(id);
-			sessionId = '';
-			teardownPeer();
-			return;
-		}
-
-		if (!response.ok) return;
-
-		const payload = (await response.json()) as {
-			candidates: Array<{ candidate: RTCIceCandidateInit | null }>;
-			nextAfter: number;
-		};
-
-		for (const item of payload.candidates) {
-			if (!item.candidate) continue;
-
-			if (!peer.currentRemoteDescription) {
-				pendingRemoteIce.push(item.candidate);
-				continue;
-			}
-
-			try {
-				await peer.addIceCandidate(item.candidate);
-			} catch (err) {
-				console.error('Failed to add ICE candidate:', err);
-			}
-		}
-
-		await flushPendingRemoteIce();
-
-		lastIceId = payload.nextAfter;
-	}
-
-	function startPolling(id: string) {
-		clearTimers();
-
-		answerPollTimer = setInterval(() => {
-			void pollAnswer(id);
-		}, 1200);
-
-		icePollTimer = setInterval(() => {
-			void pollIce(id);
-		}, 800);
-	}
-
-	async function setupPeerConnection(id: string) {
-		peer = new RTCPeerConnection({ iceServers: [] });
-		lastIceId = 0;
-		pendingRemoteIce = [];
-
-		peer.addTransceiver('video', { direction: 'recvonly' });
-
-		peer.ontrack = (event) => {
-			const [streamFromEvent] = event.streams;
-			session.log(
-				`ontrack: kind=${event.track.kind}, readyState=${event.track.readyState}, streams=${event.streams.length}`
-			);
-
-			if (streamFromEvent) {
-				remoteStream = streamFromEvent;
-				return;
-			}
-
-			if (!remoteStream) {
-				remoteStream = new MediaStream();
-			}
-
-			remoteStream.addTrack(event.track);
-		};
-
-		peer.onicecandidate = (event) => {
-			if (!event.candidate) return;
-			console.log(event.candidate);
-			void postViewerIceCandidate(id, event.candidate).catch((err) => {
-				console.error('Failed to publish viewer ICE candidate:', err);
-				session.log(`postIceCandidate failed: ${String(err)}`);
-			});
-		};
-
-		peer.onconnectionstatechange = () => {
-			if (!peer) return;
-
-			if (peer.connectionState === 'connected') {
-				clearTimers();
-				viewerWasConnected = true;
-				step = 'stream';
-				status = 'Connected';
-				session.log('peer connected');
-				void session.setState('party', id);
-				session.log('POST connected');
-				void markSessionAsConnected(id).catch((err) => {
-					console.error('Failed to mark session as connected:', err);
-					session.log(`POST connected failed: ${String(err)}`);
-				});
-			} else if (peer.connectionState === 'failed') {
-				step = 'qr';
-				status = 'Disconnected';
-				session.log('peer failed');
-				viewerWasConnected = false;
-				// Immediately tear down and post a new offer so the phone can reconnect
-				teardownPeer();
-				void setupPeerConnection(sessionId).catch(console.error);
-			} else if (peer.connectionState === 'disconnected') {
-				step = 'qr';
-				status = 'Disconnected';
-				session.log('peer disconnected');
-				viewerWasConnected = false;
-				teardownPeer();
-				void setupPeerConnection(sessionId).catch(console.error);
-			}
-		};
-
-		const offer = await peer.createOffer();
-		await peer.setLocalDescription(offer);
-
-		if (!peer.localDescription?.sdp) {
-			throw new Error('Missing local offer SDP');
-		}
-
-		await postDescription(id, 'offer', peer.localDescription.sdp);
-		void session.setState('offered', id);
-		viewerWasConnected = false;
-		step = 'qr';
-		status = 'Waiting for phone to scan code...';
-		startPolling(id);
-	}
-
 	async function refreshSession() {
 		const previousSessionId = sessionId;
 		step = 'qr';
 		fullscreen = false;
-		teardownPeer();
+		rtcManager.stop();
 		if (previousSessionId) {
 			await session.destroy(previousSessionId);
 		}
@@ -313,7 +110,7 @@
 		phoneJoinUrl = buildPhoneJoinUrl(sessionId, origin);
 		blurCode = false;
 
-		await setupPeerConnection(sessionId);
+		await rtcManager.start(sessionId);
 	}
 
 	onMount(async () => {
@@ -343,7 +140,7 @@
 			step = 'qr';
 			status = 'Restoring session...';
 
-			await setupPeerConnection(sessionId);
+			await rtcManager.start(sessionId);
 		} catch (error) {
 			handleRecoverSessionError(error);
 		}
@@ -351,8 +148,7 @@
 
 	onDestroy(() => {
 		const currentSessionId = sessionId;
-		teardownPeer();
-		viewerWasConnected = false;
+		rtcManager.stop();
 		void session.destroy(currentSessionId);
 	});
 </script>
@@ -373,8 +169,7 @@
 			{blurCode}
 			on:renew={() => void refreshSession().catch(handleRefreshSessionError)}
 			on:cancel={async () => {
-				teardownPeer();
-				viewerWasConnected = false;
+				rtcManager.stop();
 				await session.destroy(sessionId);
 				sessionId = '';
 				phoneJoinUrl = '';
