@@ -1,38 +1,44 @@
 <script lang="ts">
 	import { onMount, onDestroy, createEventDispatcher } from 'svelte';
-	import { appendSessionIdentityLog, clearSessionIdentityForSession } from '$lib/session-identity';
-	import { patchSessionRoleState } from '$lib/session-state';
+	import { ClientSession } from '$lib/client-session';
+	import CountdownRing from '$lib/CountdownRing.svelte';
 
 	const dispatch = createEventDispatcher<{ cancel: void }>();
-	export let sessionId = '';
+	let { sessionId = '' }: { sessionId: string } = $props();
 
 	let videoEl: HTMLVideoElement;
 	let stream: MediaStream | null = null;
-	let error = '';
-	let started = false;
-	let signalingStatus = 'Idle';
-	let loadingCameras = false;
-	let cameras: MediaDeviceInfo[] = [];
-	let selectedCameraId = '';
+	let error = $state('');
+	let started = $state(false);
+	let signalingStatus = $state('Idle');
+	let loadingCameras = $state(false);
+	let cameras = $state<MediaDeviceInfo[]>([]);
+	let selectedCameraId = $state('');
 
 	let peer: RTCPeerConnection | null = null;
 	let icePollTimer: ReturnType<typeof setInterval> | null = null;
 	let lastIceId = 0;
-	let lastOfferUpdatedAt = 0;
 	let phonePublishedAnswer = false;
 	let gatheredLocalCandidates: RTCIceCandidate[] = [];
 	let rejectedPublicIpv6Candidates: RTCIceCandidate[] = [];
 	let publicIpv6PromptHandled = false;
-	let showIpv6FallbackModal = false;
+	let showIpv6FallbackModal = $state(false);
 
-	let idleOverlay = false;
+	let idleOverlay = $state(false);
 	let idleTimer: ReturnType<typeof setTimeout> | null = null;
+	let idleTimerVisualKey = $state(0);
 	const IDLE_TIMEOUT_MS = 10_000;
+	const session = new ClientSession('phone');
+
+	$effect(() => {
+		if (sessionId) {
+			session.setSessionId(sessionId);
+		}
+	});
 
 	async function setPhoneState(nextState: 'waiting' | 'party') {
 		if (!sessionId) return;
-		appendSessionIdentityLog(`PATCH phone_state -> ${nextState}`);
-		await patchSessionRoleState(sessionId, 'phone', nextState);
+		await session.setState(nextState, sessionId);
 	}
 
 	function wakeFromIdle(event: PointerEvent) {
@@ -49,6 +55,7 @@
 	function resetIdleTimer() {
 		if (idleTimer) clearTimeout(idleTimer);
 		idleOverlay = false;
+		idleTimerVisualKey += 1;
 		void syncPreviewPlayback();
 		idleTimer = setTimeout(() => {
 			idleOverlay = true;
@@ -56,11 +63,23 @@
 		}, IDLE_TIMEOUT_MS);
 	}
 
+	function triggerIdleMode() {
+		if (!started) return;
+		clearIdleTimer();
+		idleOverlay = true;
+		void syncPreviewPlayback();
+	}
+
 	function clearIdleTimer() {
 		if (idleTimer) {
 			clearTimeout(idleTimer);
 			idleTimer = null;
 		}
+	}
+
+	function onWindowInteraction() {
+		if (!started || idleOverlay) return;
+		resetIdleTimer();
 	}
 
 	async function syncPreviewPlayback() {
@@ -195,6 +214,12 @@
 		return /^[23][0-9a-f]{0,3}:/i.test(normalized);
 	}
 
+	function stripIceCandidatesFromSdp(sdp: string): string {
+		return sdp
+			.replace(/^a=candidate:.*(?:\r?\n)?/gm, '')
+			.replace(/^a=end-of-candidates(?:\r?\n)?/gm, '');
+	}
+
 	function stopPeerConnection() {
 		clearSignalingTimer();
 		if (!peer) return;
@@ -211,7 +236,7 @@
 	}
 
 	function stopForRejectedIpv6Fallback() {
-		appendSessionIdentityLog('user rejected public IPv6 fallback candidate; stopping phone stream');
+		session.log('user rejected public IPv6 fallback candidate; stopping phone stream');
 		error = 'Connection stopped because only public IPv6 was available and not approved.';
 		signalingStatus = 'Stopped';
 		showIpv6FallbackModal = false;
@@ -226,7 +251,7 @@
 			return;
 		}
 
-		appendSessionIdentityLog('user accepted public IPv6 fallback candidate');
+		session.log('user accepted public IPv6 fallback candidate');
 		signalingStatus = 'Connecting (public IPv6 fallback approved)...';
 		showIpv6FallbackModal = false;
 		void publishAnswerAndCandidates([fallbackCandidate]);
@@ -234,7 +259,7 @@
 
 	async function publishAnswerAndCandidates(candidates: RTCIceCandidate[]) {
 		if (!peer?.localDescription?.sdp) {
-			appendSessionIdentityLog('publishAnswerAndCandidates: missing local SDP');
+			session.log('publishAnswerAndCandidates: missing local SDP');
 			return;
 		}
 
@@ -242,20 +267,20 @@
 			await postDescription(sessionId, 'answer', peer.localDescription.sdp);
 		} catch (err) {
 			console.error('Failed to post answer:', err);
-			appendSessionIdentityLog(`postDescription failed: ${String(err)}`);
+			session.log(`postDescription failed: ${String(err)}`);
 			signalingStatus = err instanceof Error ? err.message : 'Could not publish answer';
 			return;
 		}
 
 		phonePublishedAnswer = true;
 		void setPhoneState('waiting');
-		appendSessionIdentityLog('answer published; waiting for connection');
+		session.log('answer published; waiting for connection');
 		signalingStatus = 'Answer published. Connecting...';
 
 		for (const candidate of candidates) {
 			void postIceCandidate(sessionId, 'phone', candidate).catch((err) => {
 				console.error('Failed to publish phone ICE candidate:', err);
-				appendSessionIdentityLog(`postIceCandidate failed: ${String(err)}`);
+				session.log(`postIceCandidate failed: ${String(err)}`);
 				if (err instanceof Error && isRateLimitError(err)) {
 					signalingStatus = err.message;
 				}
@@ -266,11 +291,12 @@
 	}
 
 	async function postDescription(id: string, type: 'offer' | 'answer', sdp: string) {
-		appendSessionIdentityLog(`POST description ${type}`);
+		session.log(`POST description ${type}`);
+		const sanitizedSdp = stripIceCandidatesFromSdp(sdp);
 		const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/description`, {
 			method: 'POST',
 			headers: { 'content-type': 'application/json' },
-			body: JSON.stringify({ type, sdp })
+			body: JSON.stringify({ type, sdp: sanitizedSdp })
 		});
 
 		if (!response.ok) {
@@ -300,7 +326,7 @@
 
 	async function markSessionAsConnected(id: string) {
 		try {
-			appendSessionIdentityLog('POST connected');
+			session.log('POST connected');
 			const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/connected`, {
 				method: 'POST',
 				headers: { 'content-type': 'application/json' }
@@ -311,14 +337,14 @@
 			}
 		} catch (err) {
 			console.error('Failed to mark session as connected:', err);
-			appendSessionIdentityLog(`POST connected failed: ${String(err)}`);
+			session.log(`POST connected failed: ${String(err)}`);
 			if (err instanceof Error && isRateLimitError(err)) {
 				signalingStatus = err.message;
 			}
 		}
 	}
 
-	async function fetchOffer(id: string): Promise<{ sdp: string; updatedAt: number } | null> {
+	async function fetchOffer(id: string): Promise<{ sdp: string } | null> {
 		const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/description`);
 
 		if (response.status === 404) {
@@ -335,12 +361,11 @@
 
 		const payload = (await response.json()) as {
 			offer: { type: 'offer'; sdp: string } | null;
-			updatedAt: number;
 		};
 
 		const sdp = payload.offer?.sdp || null;
 		if (!sdp) return null;
-		return { sdp, updatedAt: payload.updatedAt ?? 0 };
+		return { sdp };
 	}
 
 	async function pollViewerIce(id: string) {
@@ -351,8 +376,8 @@
 		);
 		if (response.status === 404) {
 			signalingStatus = 'Session expired';
-			appendSessionIdentityLog('pollViewerIce: session not found (404)');
-			clearSessionIdentityForSession(id);
+			session.log('pollViewerIce: session not found (404)');
+			session.clear(id);
 			stopPeerConnection();
 			return;
 		}
@@ -360,7 +385,7 @@
 		if (response.status === 429) {
 			const err = await createApiError(response, 'Too many requests while syncing ICE');
 			signalingStatus = err.message;
-			appendSessionIdentityLog(`pollViewerIce: rate limited (${err.message})`);
+			session.log(`pollViewerIce: rate limited (${err.message})`);
 			return;
 		}
 
@@ -388,19 +413,12 @@
 		}, 800);
 	}
 
-	// newerThan: unix-seconds timestamp; only accept offers with updatedAt > newerThan.
-	// Pass 0 on first connect (accept any offer), pass lastOfferUpdatedAt on reconnect
-	// so the phone won't consume the old offer before the viewer posts a fresh one.
-	async function waitForOffer(
-		id: string,
-		newerThan = 0,
-		timeoutMs = 30000
-	): Promise<{ sdp: string; updatedAt: number }> {
+	async function waitForOffer(id: string, timeoutMs = 30000): Promise<{ sdp: string }> {
 		const start = Date.now();
 
 		while (Date.now() - start < timeoutMs) {
 			const result = await fetchOffer(id);
-			if (result && result.updatedAt > newerThan) {
+			if (result) {
 				return result;
 			}
 
@@ -410,7 +428,7 @@
 		throw new Error('Timed out waiting for viewer offer');
 	}
 
-	async function startSignaling(mediaStream: MediaStream, newerThan = 0) {
+	async function startSignaling(mediaStream: MediaStream) {
 		if (!sessionId) return;
 
 		stopPeerConnection();
@@ -420,10 +438,9 @@
 		publicIpv6PromptHandled = false;
 		showIpv6FallbackModal = false;
 		signalingStatus = 'Waiting for viewer offer...';
-		appendSessionIdentityLog(`start signaling (newerThan=${newerThan})`);
+		session.log('start signaling');
 
-		const { sdp: offerSdp, updatedAt: offerUpdatedAt } = await waitForOffer(sessionId, newerThan);
-		lastOfferUpdatedAt = offerUpdatedAt;
+		const { sdp: offerSdp } = await waitForOffer(sessionId);
 		peer = new RTCPeerConnection({ iceServers: [] });
 		lastIceId = 0;
 
@@ -451,22 +468,22 @@
 
 			const address = extractCandidateAddress(event.candidate.candidate);
 			if (!address) {
-				appendSessionIdentityLog('rejected ICE candidate: unable to parse address');
+				session.log('rejected ICE candidate: unable to parse address');
 				return;
 			}
 
-			// if (isLocalAddress(address)) {
-			// 	gatheredLocalCandidates.push(event.candidate);
-			// 	return;
-			// }
+			if (isLocalAddress(address)) {
+				gatheredLocalCandidates.push(event.candidate);
+				return;
+			}
 
 			if (isPublicIpv6Address(address)) {
 				rejectedPublicIpv6Candidates.push(event.candidate);
-				appendSessionIdentityLog(`rejected public IPv6 ICE candidate (${address})`);
+				session.log(`rejected public IPv6 ICE candidate (${address})`);
 				return;
 			}
 
-			appendSessionIdentityLog(`rejected non-local ICE candidate (${address})`);
+			session.log(`rejected non-local ICE candidate (${address})`);
 		};
 
 		peer.onconnectionstatechange = () => {
@@ -475,33 +492,20 @@
 			if (peer.connectionState === 'connected') {
 				signalingStatus = 'Connected';
 				clearSignalingTimer();
-				appendSessionIdentityLog('peer connected');
+				session.log('peer connected');
 				void setPhoneState('party');
 				void markSessionAsConnected(sessionId);
 				resetIdleTimer();
 			} else if (peer.connectionState === 'failed') {
-				// Peer failed — restart signaling. Require an offer newer than the one
-				// we last used so the phone waits for the viewer to post a fresh offer.
-				signalingStatus = 'Reconnecting...';
-				appendSessionIdentityLog('peer failed; reconnecting');
-				if (phonePublishedAnswer) {
-					void setPhoneState('waiting');
-				}
-				if (stream && started) {
-					const newerThan = lastOfferUpdatedAt;
-					const reconnectStream = stream;
-					void startSignaling(reconnectStream, newerThan).catch((err) => {
-						console.error('Reconnect failed:', err);
-						appendSessionIdentityLog(`reconnect failed: ${String(err)}`);
-						signalingStatus = 'Disconnected';
-					});
-				}
-			} else if (peer.connectionState === 'disconnected') {
-				if (phonePublishedAnswer) {
-					void setPhoneState('waiting');
-				}
-				appendSessionIdentityLog('peer disconnected');
+				session.log('peer failed; ending phone stream');
 				signalingStatus = 'Disconnected';
+				stopCamera();
+				dispatch('cancel');
+			} else if (peer.connectionState === 'disconnected') {
+				session.log('peer disconnected; ending phone stream');
+				signalingStatus = 'Disconnected';
+				stopCamera();
+				dispatch('cancel');
 			}
 		};
 
@@ -514,7 +518,7 @@
 		}
 
 		signalingStatus = 'Gathering local addresses...';
-		appendSessionIdentityLog('local description set; gathering ICE candidates');
+		session.log('local description set; gathering ICE candidates');
 		// Answer and candidates are published from onicecandidate once gathering completes
 	}
 
@@ -544,14 +548,14 @@
 		}
 	}
 
-	export async function startCamera() {
+	async function startCamera() {
 		error = '';
 		signalingStatus = 'Starting camera...';
 		stopCamera();
 
 		try {
 			stream = await navigator.mediaDevices.getUserMedia(streamConstraints());
-			appendSessionIdentityLog('camera started');
+			session.log('camera started');
 
 			videoEl.srcObject = stream;
 			await videoEl.play();
@@ -564,14 +568,14 @@
 				await startSignaling(stream);
 			} else {
 				signalingStatus = 'Missing session';
-				appendSessionIdentityLog('missing session id while starting signaling');
+				session.log('missing session id while starting signaling');
 			}
 		} catch (err) {
 			console.error(err);
-			appendSessionIdentityLog(`startCamera failed: ${String(err)}`);
+			session.log(`startCamera failed: ${String(err)}`);
 
 			if (err instanceof Error && err.message === 'Session expired or missing') {
-				clearSessionIdentityForSession(sessionId);
+				session.clear(sessionId);
 			}
 
 			if (err instanceof Error && err.message.trim()) {
@@ -632,15 +636,11 @@
 		}
 	}
 
-	export function stopCamera() {
+	function stopCamera() {
 		stopPeerConnection();
-		if (sessionId && phonePublishedAnswer) {
-			void setPhoneState('waiting');
-		}
 		phonePublishedAnswer = false;
 		showIpv6FallbackModal = false;
 		clearIdleTimer();
-		lastOfferUpdatedAt = 0;
 		signalingStatus = 'Stopped';
 		if (stream) {
 			for (const track of stream.getTracks()) track.stop();
@@ -651,6 +651,7 @@
 	}
 
 	async function onCameraChange(event: Event) {
+		resetIdleTimer();
 		selectedCameraId = (event.currentTarget as HTMLSelectElement).value;
 		if (started) await switchCamera();
 	}
@@ -660,23 +661,18 @@
 			if (started || cameras.length > 0) void loadCameras();
 		};
 
-		// When the phone comes back from background: if the camera track was killed
-		// by the OS, do a full camera restart; if the track is still alive but the
-		// peer failed/disconnected, restart signaling with a fresh offer requirement.
+		const interactionEvents: Array<keyof WindowEventMap> = ['pointerdown', 'keydown', 'wheel'];
+		for (const eventName of interactionEvents) {
+			window.addEventListener(eventName, onWindowInteraction, { passive: true });
+		}
+
+		// When the phone comes back from background and the camera track was killed
+		// by the OS, do a full camera restart.
 		const onVisibilityChange = () => {
 			if (document.hidden || !started) return;
 			const videoTrack = stream?.getVideoTracks()[0];
 			if (videoTrack && videoTrack.readyState === 'ended') {
 				void startCamera();
-			} else if (peer && (peer.connectionState === 'failed' || peer.connectionState === 'disconnected')) {
-				const newerThan = lastOfferUpdatedAt;
-				const reconnectStream = stream;
-				if (reconnectStream) {
-					void startSignaling(reconnectStream, newerThan).catch((err) => {
-						console.error('Visibility reconnect failed:', err);
-						signalingStatus = 'Disconnected';
-					});
-				}
 			}
 		};
 
@@ -685,6 +681,9 @@
 		void startCamera();
 
 		return () => {
+			for (const eventName of interactionEvents) {
+				window.removeEventListener(eventName, onWindowInteraction);
+			}
 			navigator.mediaDevices?.removeEventListener('devicechange', onDeviceChange);
 			document.removeEventListener('visibilitychange', onVisibilityChange);
 		};
@@ -699,9 +698,12 @@
 	<div
 		class="idle-overlay"
 		role="presentation"
-		on:pointerdown|preventDefault|stopPropagation={wakeFromIdle}
-		on:pointerup|preventDefault|stopPropagation
-		on:click|preventDefault|stopPropagation={wakeFromIdleClick}
+		onpointerdown={wakeFromIdle}
+		onpointerup={(event) => {
+			event.preventDefault();
+			event.stopPropagation();
+		}}
+		onclick={wakeFromIdleClick}
 	>
 		<p class="idle-hint">Power saving. Touch to wake up.</p>
 	</div>
@@ -723,7 +725,7 @@
 					id="camera-select"
 					class="select-phone"
 					bind:value={selectedCameraId}
-					on:change={onCameraChange}
+					onchange={onCameraChange}
 					disabled={loadingCameras}
 				>
 					{#each cameras as camera, index}
@@ -736,27 +738,26 @@
 		{/if}
 
 		<div class="actions">
-			{#if started}
-				<button
-					class="btn btn-phone"
-					on:click={() => {
-						if (sessionId && phonePublishedAnswer) {
-							void patchSessionRoleState(sessionId, 'phone', 'waiting');
-						}
-						stopCamera();
-					}}
-					disabled={!started}
-				>
-					Pause
-				</button>
-			{:else}
-				<button class="btn btn-phone" on:click={() => void startCamera()} disabled={started}>Restart</button>
-			{/if}
+			<button
+				type="button"
+				class="btn btn-phone idle-mode-button"
+				onclick={triggerIdleMode}
+				disabled={!started || idleOverlay}
+			>
+				<CountdownRing
+					durationMs={IDLE_TIMEOUT_MS}
+					animationKey={idleTimerVisualKey}
+					size="1.1rem"
+					complete={idleOverlay}
+				/>
+				<span>{idleOverlay ? 'Energy saving active' : 'Energy saving mode'}</span>
+			</button>
+
 			<button
 				class="btn btn-phone"
-				on:click={() => {
+				onclick={() => {
 					if (sessionId) {
-						void patchSessionRoleState(sessionId, 'phone', 'left');
+						void session.setState('left', sessionId);
 					}
 					stopCamera();
 					dispatch('cancel');
@@ -783,7 +784,7 @@
 				That address is exposed only during session setup. You can review details before deciding.
 			</p>
 			<div class="modal-actions">
-				<button class="btn btn-phone block" type="button" on:click={openImplicationsPage}>
+				<button class="btn btn-phone block" type="button" onclick={openImplicationsPage}>
 					<svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 						<circle cx="12" cy="12" r="10" />
 						<path d="M12 16V11.5" />
@@ -791,14 +792,14 @@
 					</svg>
 					See implications
 				</button>
-				<button class="btn btn-phone" type="button" on:click={confirmIpv6FallbackCandidate}>
+				<button class="btn btn-phone" type="button" onclick={confirmIpv6FallbackCandidate}>
 					<svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
 						<path d="M17 3.33782C15.5291 2.48697 13.8214 2 12 2C6.47715 2 2 6.47715 2 12C2 17.5228 6.47715 22 12 22C17.5228 22 22 17.5228 22 12C22 11.3151 21.9311 10.6462 21.8 10" />
 						<path d="M8 12.5C8 12.5 9.5 12.5 11.5 16C11.5 16 17.0588 6.83333 22 5" />
 					</svg>
 					Confirm IPv6
 				</button>
-				<button class="btn btn-phone" type="button" on:click={stopForRejectedIpv6Fallback}>
+				<button class="btn btn-phone" type="button" onclick={stopForRejectedIpv6Fallback}>
 					<svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="#141B34" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 						<path d="M12 21.5H12H12C16.4783 21.5 18.7175 21.5 20.1088 20.1088C21.5 18.7175 21.5 16.4783 21.5 12V12V12C21.5 7.52165 21.5 5.28248 20.1088 3.89124C18.7175 2.5 16.4783 2.5 12 2.5C7.52166 2.5 5.28249 2.5 3.89124 3.89124C2.5 5.28249 2.5 7.52166 2.5 12C2.5 16.4783 2.5 18.7175 3.89124 20.1088C5.28248 21.5 7.52165 21.5 12 21.5Z" />
 						<path d="M15 9L9 14.9996M15 15L9 9.00039" />
@@ -907,6 +908,12 @@
 
 	.actions :global(.btn) {
 		font-size: 16px;
+	}
+
+	.idle-mode-button {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.5rem;
 	}
 
 	.status {

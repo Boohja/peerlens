@@ -334,5 +334,10 @@ export async function markSessionAsConnected(sessionId: string): Promise<boolean
 		args: [sessionId]
 	});
 
+	await signalingClient.execute({
+		sql: `DELETE FROM ice_candidates WHERE session_id = ?`,
+		args: [sessionId]
+	});
+
 	return (result.rowsAffected ?? 0) > 0;
 }

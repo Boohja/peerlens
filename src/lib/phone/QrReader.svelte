@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { onMount, onDestroy, createEventDispatcher } from 'svelte';
 	import type QrScanner from 'qr-scanner';
+	import { toast } from '$lib/toast';
 
 	const dispatch = createEventDispatcher<{ scan: string; error: string }>();
 
@@ -38,6 +39,7 @@
 				err instanceof DOMException && err.name === 'NotAllowedError'
 					? 'Camera permission was denied.'
 					: 'Could not access camera: ' + err;
+			toast('error', message);
 			dispatch('error', message);
 		}
 	});
