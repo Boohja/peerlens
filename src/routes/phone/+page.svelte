@@ -17,10 +17,8 @@
 			: '';
 	const session = new ClientSession('phone');
 
-	let phoneState: State = $state(
-		querySessionId ? { kind: 'processing' } : { kind: 'idle' }
-	);
-	let lastScanContent = ''
+	let phoneState: State = $state(querySessionId ? { kind: 'processing' } : { kind: 'idle' });
+	let lastScanContent = '';
 	let scanClearTimer: ReturnType<typeof setTimeout> | undefined;
 
 	async function startPhoneSession(
@@ -79,8 +77,7 @@
 		}, 4000);
 	}
 
-	async function onScan(event: CustomEvent<string>) {
-		const scanned = event.detail;
+	async function onScan(scanned: string) {
 		resetScanClearTimer();
 		if (scanned === lastScanContent) {
 			return;
@@ -108,7 +105,7 @@
 		}
 	}
 
-	function onScanError(event: CustomEvent<string>) {
+	function onScanError(_message: string) {
 		phoneState = { kind: 'idle' };
 	}
 
@@ -234,12 +231,12 @@
 		<div class="card state-card">
 			<p>Point your camera at the QR code on the viewer screen.</p>
 
-			<QrReader on:scan={onScan} on:error={onScanError} />
+			<QrReader {onScan} onError={onScanError} />
 
 		</div>
 		<button onclick={() => (phoneState = { kind: 'idle' })} class="btn btn-phone">Cancel</button>
 	{:else if phoneState.kind === 'streaming'}
-		<CameraStream sessionId={phoneState.sessionId} on:cancel={onStreamCancel} />
+		<CameraStream sessionId={phoneState.sessionId} onCancel={onStreamCancel} />
 	{/if}
 </div>
 

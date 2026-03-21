@@ -1,8 +1,13 @@
 <script lang="ts">
-	export let durationMs = 4000;
-	export let animationKey: string | number = 0;
-	export let size = '1.35rem';
-	export let complete = false;
+	type Props = {
+		durationMs?: number;
+		animationKey?: string | number;
+		size?: string;
+		complete?: boolean;
+	};
+
+	let { durationMs = 4000, animationKey = 0, size = '1.35rem', complete = false }: Props =
+		$props();
 </script>
 
 {#key animationKey}

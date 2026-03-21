@@ -1,15 +1,23 @@
 <script lang="ts">
-	import { createEventDispatcher } from 'svelte';
+	type Props = {
+		phoneJoinUrl?: string;
+		status?: string;
+		blurCode?: boolean;
+		onRenew?: () => void;
+		onCancel?: () => void;
+	};
 
-	export let phoneJoinUrl = '';
-	export let status = '';
-	export let blurCode = false;
+	let {
+		phoneJoinUrl = '',
+		status = '',
+		blurCode = false,
+		onRenew,
+		onCancel
+	}: Props = $props();
 
-	let qrCodeUrl = '';
+	let qrCodeUrl = $state('');
 	let qrModulePromise: Promise<typeof import('qrcode')> | null = null;
 	let qrRequestId = 0;
-
-	const dispatch = createEventDispatcher<{ renew: void, cancel: void }>();
 
 	async function toQrDataUrl(value: string) {
 		qrModulePromise ??= import('qrcode');
@@ -45,7 +53,9 @@
 		}
 	}
 
-	$: void updateQrCode(phoneJoinUrl);
+	$effect(() => {
+		void updateQrCode(phoneJoinUrl);
+	});
 </script>
 
 <div class="card qr-panel">
@@ -71,7 +81,7 @@
 	<p class="status-line"><strong>Status:</strong> {status || 'Preparing session...'}</p>
 
 	<div class="grid grid-cols-2 gap-6">
-		<button class="btn btn-viewer" type="button" onclick={() => dispatch('renew')}>
+		<button class="btn btn-viewer" type="button" onclick={() => onRenew?.()}>
 			<svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 				<path d="M3.05493 13C3.01863 12.6717 3 12.338 3 12C3 7.02944 7.02944 3 12 3C14.8273 3 17.35 4.30367 19 6.34267M20.9451 11C20.9814 11.3283 21 11.662 21 12C21 16.9706 16.9706 21 12 21C9.17273 21 6.64996 19.6963 5 17.6573" />
 				<path d="M16 7H17C18.4142 7 19.1213 7 19.5607 6.56066C20 6.12132 20 5.41421 20 4V3" />
@@ -80,7 +90,7 @@
 			New session
 		</button>
 	
-		<button class="btn btn-viewer btn-subtle" type="button" onclick={() => dispatch('cancel')}>
+		<button class="btn btn-viewer btn-subtle" type="button" onclick={() => onCancel?.()}>
 			<svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
 				<path d="M12 21.5H12H12C16.4783 21.5 18.7175 21.5 20.1088 20.1088C21.5 18.7175 21.5 16.4783 21.5 12V12V12C21.5 7.52165 21.5 5.28248 20.1088 3.89124C18.7175 2.5 16.4783 2.5 12 2.5C7.52166 2.5 5.28249 2.5 3.89124 3.89124C2.5 5.28249 2.5 7.52166 2.5 12C2.5 16.4783 2.5 18.7175 3.89124 20.1088C5.28248 21.5 7.52165 21.5 12 21.5Z" />
 				<path d="M15 9L9 14.9996M15 15L9 9.00039" />

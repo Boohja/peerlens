@@ -161,14 +161,14 @@
 
 <main class="content">
 	{#if step === 'landing'}
-		<ViewerLanding on:start={() => void refreshSession().catch(handleRefreshSessionError)} />
+		<ViewerLanding onStart={() => void refreshSession().catch(handleRefreshSessionError)} />
 	{:else if step === 'qr'}
 		<ViewerQrPanel
 			{phoneJoinUrl}
 			{status}
 			{blurCode}
-			on:renew={() => void refreshSession().catch(handleRefreshSessionError)}
-			on:cancel={async () => {
+			onRenew={() => void refreshSession().catch(handleRefreshSessionError)}
+			onCancel={async () => {
 				rtcManager.stop();
 				await session.destroy(sessionId);
 				sessionId = '';
@@ -184,13 +184,13 @@
 			{status}
 			{fullscreen}
 			{videoFit}
-			on:fitchange={(event) => {
-				videoFit = event.detail;
+			onFitChange={(nextFit) => {
+				videoFit = nextFit;
 			}}
-			on:fullscreenchange={(event) => {
-				fullscreen = event.detail;
+			onFullscreenChange={(nextFullscreen) => {
+				fullscreen = nextFullscreen;
 			}}
-			on:retry={() => void refreshSession().catch(handleRefreshSessionError)}
+			onRetry={() => void refreshSession().catch(handleRefreshSessionError)}
 		/>
 	{/if}
 

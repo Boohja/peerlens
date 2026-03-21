@@ -1,9 +1,14 @@
 <script lang="ts">
-	import { onMount, onDestroy, createEventDispatcher } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import type QrScanner from 'qr-scanner';
 	import { toast } from '$lib/toast';
 
-	const dispatch = createEventDispatcher<{ scan: string; error: string }>();
+	type Props = {
+		onScan?: (value: string) => void;
+		onError?: (message: string) => void;
+	};
+
+	let { onScan, onError }: Props = $props();
 
 	let videoEl: HTMLVideoElement;
 	let scannerInstance: QrScanner | null = null;
@@ -22,7 +27,7 @@
 					const now = Date.now();
 					if (now - lastDispatchAt < DISPATCH_COOLDOWN_MS) return;
 					lastDispatchAt = now;
-					dispatch('scan', result.data);
+						onScan?.(result.data);
 				},
 				{
 					preferredCamera: 'environment',
@@ -40,7 +45,7 @@
 					? 'Camera permission was denied.'
 					: 'Could not access camera: ' + err;
 			toast('error', message);
-			dispatch('error', message);
+			onError?.(message);
 		}
 	});
 

@@ -1,20 +1,29 @@
 <script lang="ts">
-	import { createEventDispatcher } from 'svelte';
+	type VideoFit = 'contain' | 'cover';
 
-	export let remoteStream: MediaStream | null = null;
-	export let status = '';
-	export let fullscreen = false;
-	export let videoFit: 'contain' | 'cover' = 'contain';
+	type Props = {
+		remoteStream?: MediaStream | null;
+		status?: string;
+		fullscreen?: boolean;
+		videoFit?: VideoFit;
+		onFitChange?: (fit: VideoFit) => void;
+		onFullscreenChange?: (fullscreen: boolean) => void;
+		onRetry?: () => void;
+	};
+
+	let {
+		remoteStream = null,
+		status = '',
+		fullscreen = false,
+		videoFit = 'contain',
+		onFitChange,
+		onFullscreenChange,
+		onRetry
+	}: Props = $props();
 
 	let remoteVideoEl: HTMLVideoElement | undefined;
 
-	const dispatch = createEventDispatcher<{
-		fitchange: 'contain' | 'cover';
-		fullscreenchange: boolean;
-		retry: void;
-	}>();
-
-	$: {
+	$effect(() => {
 		const videoElement = remoteVideoEl;
 
 		if (videoElement && remoteStream && videoElement.srcObject !== remoteStream) {
@@ -23,7 +32,7 @@
 		} else if (videoElement && !remoteStream && videoElement.srcObject) {
 			videoElement.srcObject = null;
 		}
-	}
+	});
 </script>
 
 <div class="video-wrap" class:fullscreen>
@@ -32,8 +41,8 @@
 			type="button"
 			class:active={videoFit === 'cover'}
 			onclick={() => {
-				dispatch('fitchange', 'cover');
-				dispatch('fullscreenchange', true);
+				onFitChange?.('cover');
+				onFullscreenChange?.(true);
 			}}
 			title="Fill width - crops top and bottom"
 		>
@@ -49,8 +58,8 @@
 			type="button"
 			class:active={videoFit === 'contain'}
 			onclick={() => {
-				dispatch('fitchange', 'contain');
-				dispatch('fullscreenchange', true);
+				onFitChange?.('contain');
+				onFullscreenChange?.(true);
 			}}
 			title="Fit height - black bars on sides"
 		>
@@ -64,7 +73,7 @@
 			<button
 				type="button"
 				class="close-btn"
-				onclick={() => dispatch('fullscreenchange', false)}
+				onclick={() => onFullscreenChange?.(false)}
 				title="Exit fullscreen"
 			>
 				X
@@ -84,7 +93,7 @@
 	<p class="status">{status}</p>
 
 	{#if status === 'Disconnected'}
-		<button class="btn btn-viewer retry-btn" type="button" onclick={() => dispatch('retry')}>
+		<button class="btn btn-viewer retry-btn" type="button" onclick={() => onRetry?.()}>
 			Retry
 		</button>
 	{/if}

@@ -1,7 +1,9 @@
 <script lang="ts">
-	import { createEventDispatcher } from 'svelte';
+	type Props = {
+		onStart?: () => void;
+	};
 
-	const dispatch = createEventDispatcher<{ start: void }>();
+	let { onStart }: Props = $props();
 </script>
 
 <section class="viewer-landing">
@@ -58,7 +60,7 @@
 					</div>
 				</div>
 	
-				<button type="button" class="btn btn-viewer cta" onclick={() => dispatch('start')}>
+				<button type="button" class="btn btn-viewer cta" onclick={() => onStart?.()}>
 					Create new session
 				</button>
 			</div>

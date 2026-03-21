@@ -1,11 +1,16 @@
 <script lang="ts">
-	import { onMount, onDestroy, createEventDispatcher } from 'svelte';
+	import { onMount, onDestroy } from 'svelte';
 	import { ClientSession } from '$lib/client-session';
 	import CountdownRing from '$lib/CountdownRing.svelte';
 	import { PhoneRtcManager } from '$lib/phone/PhoneRtcManager';
 
-	const dispatch = createEventDispatcher<{ cancel: void }>();
-	let { sessionId = '' }: { sessionId: string } = $props();
+	let {
+		sessionId = '',
+		onCancel
+	}: {
+		sessionId: string;
+		onCancel?: () => void;
+	} = $props();
 
 	let videoEl: HTMLVideoElement;
 	let stream: MediaStream | null = null;
@@ -39,7 +44,7 @@
 		},
 		onPeerDisconnected: () => {
 			stopCamera();
-			dispatch('cancel');
+			onCancel?.();
 		}
 	});
 
@@ -381,7 +386,7 @@
 						void session.setState('left', sessionId);
 					}
 					stopCamera();
-					dispatch('cancel');
+						onCancel?.();
 				}}
 			>
 				Leave
