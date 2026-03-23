@@ -20,6 +20,7 @@ const configuredDatabaseAuthToken =
 const configuredPath = (process.env.PEERLENS_DB_PATH || '').trim();
 const dbFilePath = resolve(configuredPath || '.data/peerlens.sqlite');
 const databaseUrl = configuredDatabaseUrl || `file:${dbFilePath}`;
+const usesLocalFileDatabase = databaseUrl.startsWith('file:');
 
 if (!configuredDatabaseUrl) {
 	mkdirSync(dirname(dbFilePath), { recursive: true });
@@ -105,8 +106,10 @@ export async function cleanupSignalingIfDue(force = false): Promise<void> {
 
 export async function ensureSignalingInitialized(): Promise<void> {
 	initialized ??= (async () => {
-		await signalingClient.execute('PRAGMA journal_mode = WAL;');
-		await signalingClient.execute('PRAGMA foreign_keys = ON;');
+		if (usesLocalFileDatabase) {
+			await signalingClient.execute('PRAGMA journal_mode = WAL;');
+			await signalingClient.execute('PRAGMA foreign_keys = ON;');
+		}
 
 		await signalingClient.execute(`
 			CREATE TABLE IF NOT EXISTS sessions (
@@ -125,45 +128,19 @@ export async function ensureSignalingInitialized(): Promise<void> {
 			);
 		`);
 
-		const sessionColumns = await signalingClient.execute(`PRAGMA table_info(sessions)`);
-		const hasExpiresAt = sessionColumns.rows.some((row) => asString(row.name) === 'expires_at');
-		if (!hasExpiresAt) {
-			await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN expires_at INTEGER`);
-		}
-
-		const hasConnectedAt = sessionColumns.rows.some((row) => asString(row.name) === 'connected_at');
-		if (!hasConnectedAt) {
-			await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN connected_at INTEGER`);
-		}
-
-		const hasViewerState = sessionColumns.rows.some((row) => asString(row.name) === 'viewer_state');
-		if (!hasViewerState) {
-			await signalingClient.execute(
-				`ALTER TABLE sessions ADD COLUMN viewer_state TEXT CHECK(viewer_state IN ('offered', 'waiting', 'party', 'left'))`
-			);
-		}
-
-		const hasPhoneState = sessionColumns.rows.some((row) => asString(row.name) === 'phone_state');
-		if (!hasPhoneState) {
-			await signalingClient.execute(
-				`ALTER TABLE sessions ADD COLUMN phone_state TEXT CHECK(phone_state IN ('offered', 'waiting', 'party', 'left'))`
-			);
-		}
-
-		const hasStateVersion = sessionColumns.rows.some((row) => asString(row.name) === 'state_version');
-		if (!hasStateVersion) {
-			await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN state_version INTEGER NOT NULL DEFAULT 0`);
-		}
-
-		const hasViewerStateAt = sessionColumns.rows.some((row) => asString(row.name) === 'viewer_state_at');
-		if (!hasViewerStateAt) {
-			await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN viewer_state_at INTEGER`);
-		}
-
-		const hasPhoneStateAt = sessionColumns.rows.some((row) => asString(row.name) === 'phone_state_at');
-		if (!hasPhoneStateAt) {
-			await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN phone_state_at INTEGER`);
-		}
+		await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS expires_at INTEGER`);
+		await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS connected_at INTEGER`);
+		await signalingClient.execute(
+			`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS viewer_state TEXT CHECK(viewer_state IN ('offered', 'waiting', 'party', 'left'))`
+		);
+		await signalingClient.execute(
+			`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS phone_state TEXT CHECK(phone_state IN ('offered', 'waiting', 'party', 'left'))`
+		);
+		await signalingClient.execute(
+			`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS state_version INTEGER NOT NULL DEFAULT 0`
+		);
+		await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS viewer_state_at INTEGER`);
+		await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS phone_state_at INTEGER`);
 
 		await signalingClient.execute(`UPDATE sessions SET state_version = 0 WHERE state_version IS NULL`);
 
