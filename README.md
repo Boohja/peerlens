@@ -1,41 +1,80 @@
 # PeerLens
 
-PeerLens now runs with the SvelteKit Node adapter and includes a lightweight SQLite-backed signaling store for WebRTC session metadata (SDP + ICE candidates).
+<div style="text-align: center">
+  <img src="static/logo/logo.svg" width=250>
+</div>
 
-WebRTC is configured LAN-only (no STUN/TURN servers), so both peers are expected to be on the same local network.
+Pair two devices through their browser, one with a camera.\
+Use PeerLens to connect them through WebRTC and watch the video stream of your camera.
 
-## Developing
+## Privacy focus
 
-### Signaling DB configuration
+PeerLens uses only that [data that is absolutely necessary](https://peerlens.sorkos.net/data) to establish a connection between your two devices. \
+We don't care for that data, "trust me". No analytics, no account, no mails, nothing.
+
+## Dev documentation
+
+All configuration values are optional since hard-coded default values exist.
+
+If no database address is provided, PeerLens will use SQLite.
+
+
+### Configuration
 
 By default, signaling data is stored at `.data/peerlens.sqlite`.
 
 ```sh
-# optional: custom SQLite file path
+# remote libSQL, otherwise sqlite is used
+PEERLENS_DB_URL=libsql://your-database.turso.io
+PEERLENS_DB_AUTH_TOKEN=your-token
+
+# custom SQLite file path
 PEERLENS_DB_PATH=.data/peerlens.sqlite
 
-# optional: offer/session TTL (default: 600 = 10 minutes)
+# offer/session TTL (default: 600 = 10 minutes)
 PEERLENS_OFFER_TTL_SECONDS=600
 
-# optional: periodic cleanup frequency (default: 60 seconds)
+# periodic cleanup frequency (default: 60 seconds)
 PEERLENS_CLEANUP_INTERVAL_SECONDS=60
 
-# optional: delete unconnected sessions after (default: 120 = 2 minutes)
+# delete unconnected sessions after (default: 120 = 2 minutes)
 PEERLENS_UNCONNECTED_SESSION_TTL_SECONDS=120
 
-# optional: delete connected sessions after (default: 7200 = 2 hours)
+# delete connected sessions after (default: 7200 = 2 hours)
 PEERLENS_CONNECTED_SESSION_TTL_SECONDS=7200
 
-# optional: remove old ICE candidates (default: 1200 seconds)
+# remove old ICE candidates (default: 1200 seconds)
 PEERLENS_ICE_MAX_AGE_SECONDS=1200
 
-# optional: keep at most N recent ICE candidates per role per session (default: 64)
+# keep at most N recent ICE candidates per role per session (default: 64)
 PEERLENS_ICE_MAX_CANDIDATES_PER_ROLE=64
+
+# viewer-side answer polling backoff (defaults: 1200..8000 ms)
+PUBLIC_PEERLENS_VIEWER_ANSWER_POLL_MIN_MS=1200
+PUBLIC_PEERLENS_VIEWER_ANSWER_POLL_MAX_MS=8000
+
+# viewer-side ICE polling backoff (defaults: 800..5000 ms)
+PUBLIC_PEERLENS_VIEWER_ICE_POLL_MIN_MS=800
+PUBLIC_PEERLENS_VIEWER_ICE_POLL_MAX_MS=5000
+
+# phone-side offer polling backoff (defaults: 700..5000 ms)
+PUBLIC_PEERLENS_PHONE_OFFER_POLL_MIN_MS=700
+PUBLIC_PEERLENS_PHONE_OFFER_POLL_MAX_MS=5000
+
+# phone-side ICE polling backoff (defaults: 800..5000 ms)
+PUBLIC_PEERLENS_PHONE_ICE_POLL_MIN_MS=800
+PUBLIC_PEERLENS_PHONE_ICE_POLL_MAX_MS=5000
+```
+```sh
+# optional, otherwise the current location is parsed
+PUBLIC_APP_HOST=http://192.168.1.50:5173
 ```
 
-Once you've created a project and installed dependencies with `bun install` (or `pnpm install` or `yarn`), start a development server:
+### Run
 
 ```sh
+bun install
+
 bun --bun run dev
 
 # or start the server and open the app in a new browser tab
@@ -45,28 +84,3 @@ bun --bun run dev -- --open
 ### Viewer host configuration
 
 For the desktop viewer QR flow, configure the public host origin that phones should open:
-
-```sh
-# example .env
-PUBLIC_APP_HOST=http://192.168.1.50:5173
-```
-
-If this is not set, the app falls back to the current browser origin.
-
-## Building
-
-To create a production version of your app:
-
-```sh
-npm run build
-```
-
-You can preview the production build with `npm run preview`.
-
-### Running the Node build
-
-After `npm run build`, run the generated Node server:
-
-```sh
-node build
-```

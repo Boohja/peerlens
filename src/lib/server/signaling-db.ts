@@ -14,12 +14,22 @@ export const ICE_MAX_AGE_SECONDS =
 export const ICE_MAX_CANDIDATES_PER_ROLE =
 	Number.parseInt(process.env.PEERLENS_ICE_MAX_CANDIDATES_PER_ROLE || '64', 10) || 64;
 
+const configuredDatabaseUrl = (process.env.PEERLENS_DB_URL || '').trim();
+const configuredDatabaseAuthToken =
+	(process.env.PEERLENS_DB_AUTH_TOKEN || process.env.TURSO_AUTH_TOKEN || '').trim();
 const configuredPath = (process.env.PEERLENS_DB_PATH || '').trim();
 const dbFilePath = resolve(configuredPath || '.data/peerlens.sqlite');
+const databaseUrl = configuredDatabaseUrl || `file:${dbFilePath}`;
 
-mkdirSync(dirname(dbFilePath), { recursive: true });
+if (!configuredDatabaseUrl) {
+	mkdirSync(dirname(dbFilePath), { recursive: true });
+}
 
-export const signalingClient = createClient({ url: `file:${dbFilePath}` });
+export const signalingClient = createClient(
+	configuredDatabaseAuthToken
+		? { url: databaseUrl, authToken: configuredDatabaseAuthToken }
+		: { url: databaseUrl }
+);
 
 let initialized: Promise<void> | null = null;
 let nextCleanupAtMs = 0;
