@@ -17,6 +17,26 @@ type PhoneRtcManagerOptions = {
 	onPeerDisconnected: () => void;
 };
 
+function parsePollMs(raw: string | undefined, fallback: number): number {
+	const parsed = Number.parseInt(raw || '', 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return fallback;
+	}
+
+	return parsed;
+}
+
+const OFFER_POLL_MIN_MS = parsePollMs(import.meta.env.PUBLIC_PEERLENS_PHONE_OFFER_POLL_MIN_MS, 700);
+const OFFER_POLL_MAX_MS = Math.max(
+	OFFER_POLL_MIN_MS,
+	parsePollMs(import.meta.env.PUBLIC_PEERLENS_PHONE_OFFER_POLL_MAX_MS, 5000)
+);
+const ICE_POLL_MIN_MS = parsePollMs(import.meta.env.PUBLIC_PEERLENS_PHONE_ICE_POLL_MIN_MS, 800);
+const ICE_POLL_MAX_MS = Math.max(
+	ICE_POLL_MIN_MS,
+	parsePollMs(import.meta.env.PUBLIC_PEERLENS_PHONE_ICE_POLL_MAX_MS, 5000)
+);
+
 function isRateLimitError(error: unknown): boolean {
 	if (!(error instanceof Error)) {
 		return false;
@@ -75,7 +95,9 @@ function isPublicIpv6Address(address: string): boolean {
 
 export class PhoneRtcManager {
 	private peer: RTCPeerConnection | null = null;
-	private icePollTimer: ReturnType<typeof setInterval> | null = null;
+	private icePollTimer: ReturnType<typeof setTimeout> | null = null;
+	private icePollDelayMs = ICE_POLL_MIN_MS;
+	private icePollInFlight = false;
 	private lastIceId = 0;
 	private gatheredLocalCandidates: RTCIceCandidate[] = [];
 	private rejectedPublicIpv6Candidates: RTCIceCandidate[] = [];
@@ -96,6 +118,8 @@ export class PhoneRtcManager {
 
 		if (!this.peer) {
 			this.lastIceId = 0;
+			this.icePollDelayMs = ICE_POLL_MIN_MS;
+			this.icePollInFlight = false;
 			return;
 		}
 
@@ -104,6 +128,8 @@ export class PhoneRtcManager {
 		this.peer.close();
 		this.peer = null;
 		this.lastIceId = 0;
+		this.icePollDelayMs = ICE_POLL_MIN_MS;
+		this.icePollInFlight = false;
 	}
 
 	async replaceVideoTrack(nextTrack: MediaStreamTrack, nextStream: MediaStream): Promise<void> {
@@ -247,7 +273,7 @@ export class PhoneRtcManager {
 
 	private clearSignalingTimer(): void {
 		if (this.icePollTimer) {
-			clearInterval(this.icePollTimer);
+			clearTimeout(this.icePollTimer);
 			this.icePollTimer = null;
 		}
 	}
@@ -310,8 +336,8 @@ export class PhoneRtcManager {
 		return { sdp };
 	}
 
-	private async pollViewerIce(id: string): Promise<void> {
-		if (!this.peer) return;
+	private async pollViewerIce(id: string): Promise<number> {
+		if (!this.peer) return 0;
 
 		const response = await fetchIceCandidatesForPhone(id, this.lastIceId, 100);
 		if (response.status === 404) {
@@ -319,18 +345,18 @@ export class PhoneRtcManager {
 			this.options.session.log('pollViewerIce: session not found (404)');
 			this.options.session.clear(id);
 			this.stop();
-			return;
+			return 0;
 		}
 
 		if (response.status === 429) {
 			const err = await createApiError(response, 'Too many requests while syncing ICE');
 			this.options.onStatusChange(err.message);
 			this.options.session.log(`pollViewerIce: rate limited (${err.message})`);
-			return;
+			return -1;
 		}
 
 		if (!response.ok) {
-			return;
+			return 0;
 		}
 
 		const payload = (await response.json()) as {
@@ -344,25 +370,92 @@ export class PhoneRtcManager {
 		}
 
 		this.lastIceId = payload.nextAfter;
+		return payload.candidates.length;
 	}
 
 	private startIcePolling(id: string): void {
 		this.clearSignalingTimer();
-		this.icePollTimer = setInterval(() => {
-			void this.pollViewerIce(id);
-		}, 800);
+		this.icePollDelayMs = ICE_POLL_MIN_MS;
+		this.scheduleIcePoll(id, 0);
+	}
+
+	private scheduleIcePoll(id: string, delayMs: number): void {
+		if (this.icePollTimer) {
+			clearTimeout(this.icePollTimer);
+		}
+
+		this.icePollTimer = setTimeout(() => {
+			void this.runIcePoll(id);
+		}, delayMs);
+	}
+
+	private canContinueIcePolling(): boolean {
+		if (!this.peer) {
+			return false;
+		}
+
+		return this.peer.connectionState !== 'connected';
+	}
+
+	private async runIcePoll(id: string): Promise<void> {
+		this.icePollTimer = null;
+		if (!this.canContinueIcePolling() || this.icePollInFlight) {
+			return;
+		}
+
+		this.icePollInFlight = true;
+		try {
+			const pollResult = await this.pollViewerIce(id);
+			if (!this.canContinueIcePolling()) {
+				return;
+			}
+
+			if (pollResult > 0) {
+				this.icePollDelayMs = ICE_POLL_MIN_MS;
+			} else if (pollResult === -1) {
+				this.icePollDelayMs = Math.min(ICE_POLL_MAX_MS, this.icePollDelayMs * 2);
+			} else {
+				this.icePollDelayMs = Math.min(ICE_POLL_MAX_MS, Math.round(this.icePollDelayMs * 1.5));
+			}
+
+			this.scheduleIcePoll(id, this.icePollDelayMs);
+		} catch (err) {
+			this.options.session.log(`pollViewerIce failed: ${String(err)}`);
+			if (!this.canContinueIcePolling()) {
+				return;
+			}
+
+			this.icePollDelayMs = Math.min(ICE_POLL_MAX_MS, this.icePollDelayMs * 2);
+			this.scheduleIcePoll(id, this.icePollDelayMs);
+		} finally {
+			this.icePollInFlight = false;
+		}
 	}
 
 	private async waitForOffer(id: string, timeoutMs = 30000): Promise<{ sdp: string }> {
 		const start = Date.now();
+		let offerPollDelayMs = OFFER_POLL_MIN_MS;
 
 		while (Date.now() - start < timeoutMs) {
-			const result = await this.fetchOffer(id);
-			if (result) {
-				return result;
+			try {
+				const result = await this.fetchOffer(id);
+				if (result) {
+					return result;
+				}
+			} catch (err) {
+				if (!isRateLimitError(err)) {
+					throw err;
+				}
+
+				const message = err instanceof Error ? err.message : 'Too many requests while waiting for viewer offer';
+				this.options.onStatusChange(message);
+				offerPollDelayMs = Math.min(OFFER_POLL_MAX_MS, offerPollDelayMs * 2);
+				await new Promise((resolve) => setTimeout(resolve, offerPollDelayMs));
+				continue;
 			}
 
-			await new Promise((resolve) => setTimeout(resolve, 700));
+			await new Promise((resolve) => setTimeout(resolve, offerPollDelayMs));
+			offerPollDelayMs = Math.min(OFFER_POLL_MAX_MS, Math.round(offerPollDelayMs * 1.5));
 		}
 
 		throw new Error('Timed out waiting for viewer offer');

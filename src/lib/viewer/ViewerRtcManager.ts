@@ -16,10 +16,34 @@ type ViewerRtcManagerOptions = {
 	onSessionInvalidated: () => void;
 };
 
+function parsePollMs(raw: string | undefined, fallback: number): number {
+	const parsed = Number.parseInt(raw || '', 10);
+	if (!Number.isFinite(parsed) || parsed <= 0) {
+		return fallback;
+	}
+
+	return parsed;
+}
+
+const ANSWER_POLL_MIN_MS = parsePollMs(import.meta.env.PUBLIC_PEERLENS_VIEWER_ANSWER_POLL_MIN_MS, 1200);
+const ANSWER_POLL_MAX_MS = Math.max(
+	ANSWER_POLL_MIN_MS,
+	parsePollMs(import.meta.env.PUBLIC_PEERLENS_VIEWER_ANSWER_POLL_MAX_MS, 8000)
+);
+const ICE_POLL_MIN_MS = parsePollMs(import.meta.env.PUBLIC_PEERLENS_VIEWER_ICE_POLL_MIN_MS, 800);
+const ICE_POLL_MAX_MS = Math.max(
+	ICE_POLL_MIN_MS,
+	parsePollMs(import.meta.env.PUBLIC_PEERLENS_VIEWER_ICE_POLL_MAX_MS, 5000)
+);
+
 export class ViewerRtcManager {
 	private peer: RTCPeerConnection | null = null;
-	private answerPollTimer: ReturnType<typeof setInterval> | null = null;
-	private icePollTimer: ReturnType<typeof setInterval> | null = null;
+	private answerPollTimer: ReturnType<typeof setTimeout> | null = null;
+	private icePollTimer: ReturnType<typeof setTimeout> | null = null;
+	private answerPollDelayMs = ANSWER_POLL_MIN_MS;
+	private icePollDelayMs = ICE_POLL_MIN_MS;
+	private answerPollInFlight = false;
+	private icePollInFlight = false;
 	private lastIceId = 0;
 	private pendingRemoteIce: RTCIceCandidateInit[] = [];
 	private remoteStream: MediaStream | null = null;
@@ -39,6 +63,10 @@ export class ViewerRtcManager {
 		}
 
 		this.lastIceId = 0;
+		this.answerPollDelayMs = ANSWER_POLL_MIN_MS;
+		this.icePollDelayMs = ICE_POLL_MIN_MS;
+		this.answerPollInFlight = false;
+		this.icePollInFlight = false;
 		this.remoteStream = null;
 		this.options.onRemoteStreamChange(null);
 	}
@@ -141,18 +169,18 @@ export class ViewerRtcManager {
 
 	private clearTimers(): void {
 		if (this.answerPollTimer) {
-			clearInterval(this.answerPollTimer);
+			clearTimeout(this.answerPollTimer);
 			this.answerPollTimer = null;
 		}
 
 		if (this.icePollTimer) {
-			clearInterval(this.icePollTimer);
+			clearTimeout(this.icePollTimer);
 			this.icePollTimer = null;
 		}
 	}
 
-	private async pollAnswer(id: string): Promise<void> {
-		if (!this.peer) return;
+	private async pollAnswer(id: string): Promise<boolean> {
+		if (!this.peer) return false;
 
 		const response = await fetch(`/api/sessions/${encodeURIComponent(id)}/description`);
 		if (response.status === 404) {
@@ -163,27 +191,28 @@ export class ViewerRtcManager {
 			this.options.session.clear(id);
 			this.options.onSessionInvalidated();
 			this.stop();
-			return;
+			return false;
 		}
 
-		if (!response.ok) return;
+		if (!response.ok) return false;
 
 		const payload = (await response.json()) as {
 			answer: { type: 'answer'; sdp: string } | null;
 		};
 
 		if (!payload.answer || !this.peer || this.peer.currentRemoteDescription) {
-			return;
+			return false;
 		}
 
 		await this.peer.setRemoteDescription({ type: payload.answer.type, sdp: payload.answer.sdp });
 		await this.flushPendingRemoteIce();
 		this.options.session.log('answer received and set as remote description');
 		this.options.onStatusChange('Answer received. Establishing stream...');
+		return true;
 	}
 
-	private async pollIce(id: string): Promise<void> {
-		if (!this.peer) return;
+	private async pollIce(id: string): Promise<number> {
+		if (!this.peer) return 0;
 
 		const response = await fetchIceCandidatesForViewer(id, this.lastIceId, 100);
 		if (response.status === 404) {
@@ -194,18 +223,21 @@ export class ViewerRtcManager {
 			this.options.session.clear(id);
 			this.options.onSessionInvalidated();
 			this.stop();
-			return;
+			return 0;
 		}
 
-		if (!response.ok) return;
+		if (!response.ok) return 0;
 
 		const payload = (await response.json()) as {
 			candidates: Array<{ candidate: RTCIceCandidateInit | null }>;
 			nextAfter: number;
 		};
 
+		let candidateCount = 0;
+
 		for (const item of payload.candidates) {
 			if (!item.candidate || !this.peer) continue;
+			candidateCount += 1;
 
 			if (!this.peer.currentRemoteDescription) {
 				this.pendingRemoteIce.push(item.candidate);
@@ -221,17 +253,106 @@ export class ViewerRtcManager {
 
 		await this.flushPendingRemoteIce();
 		this.lastIceId = payload.nextAfter;
+		return candidateCount;
 	}
 
 	private startPolling(id: string): void {
 		this.clearTimers();
+		this.answerPollDelayMs = ANSWER_POLL_MIN_MS;
+		this.icePollDelayMs = ICE_POLL_MIN_MS;
+		this.scheduleAnswerPoll(id, 0);
+		this.scheduleIcePoll(id, 0);
+	}
 
-		this.answerPollTimer = setInterval(() => {
-			void this.pollAnswer(id);
-		}, 1200);
+	private scheduleAnswerPoll(id: string, delayMs: number): void {
+		if (this.answerPollTimer) {
+			clearTimeout(this.answerPollTimer);
+		}
 
-		this.icePollTimer = setInterval(() => {
-			void this.pollIce(id);
-		}, 800);
+		this.answerPollTimer = setTimeout(() => {
+			void this.runAnswerPoll(id);
+		}, delayMs);
+	}
+
+	private scheduleIcePoll(id: string, delayMs: number): void {
+		if (this.icePollTimer) {
+			clearTimeout(this.icePollTimer);
+		}
+
+		this.icePollTimer = setTimeout(() => {
+			void this.runIcePoll(id);
+		}, delayMs);
+	}
+
+	private canContinueIcePolling(): boolean {
+		if (!this.peer) {
+			return false;
+		}
+
+		return this.peer.connectionState !== 'connected';
+	}
+
+	private async runAnswerPoll(id: string): Promise<void> {
+		this.answerPollTimer = null;
+		if (!this.peer || this.peer.currentRemoteDescription || this.answerPollInFlight) {
+			return;
+		}
+
+		this.answerPollInFlight = true;
+		try {
+			const receivedAnswer = await this.pollAnswer(id);
+			if (!this.peer || this.peer.currentRemoteDescription || receivedAnswer) {
+				return;
+			}
+
+			this.answerPollDelayMs = Math.min(
+				ANSWER_POLL_MAX_MS,
+				Math.round(this.answerPollDelayMs * 1.5)
+			);
+			this.scheduleAnswerPoll(id, this.answerPollDelayMs);
+		} catch (err) {
+			this.options.session.log(`pollAnswer failed: ${String(err)}`);
+			if (!this.peer || this.peer.currentRemoteDescription) {
+				return;
+			}
+
+			this.answerPollDelayMs = Math.min(ANSWER_POLL_MAX_MS, this.answerPollDelayMs * 2);
+			this.scheduleAnswerPoll(id, this.answerPollDelayMs);
+		} finally {
+			this.answerPollInFlight = false;
+		}
+	}
+
+	private async runIcePoll(id: string): Promise<void> {
+		this.icePollTimer = null;
+		if (!this.canContinueIcePolling() || this.icePollInFlight) {
+			return;
+		}
+
+		this.icePollInFlight = true;
+		try {
+			const receivedCandidates = await this.pollIce(id);
+			if (!this.canContinueIcePolling()) {
+				return;
+			}
+
+			if (receivedCandidates > 0) {
+				this.icePollDelayMs = ICE_POLL_MIN_MS;
+			} else {
+				this.icePollDelayMs = Math.min(ICE_POLL_MAX_MS, Math.round(this.icePollDelayMs * 1.5));
+			}
+
+			this.scheduleIcePoll(id, this.icePollDelayMs);
+		} catch (err) {
+			this.options.session.log(`pollIce failed: ${String(err)}`);
+			if (!this.canContinueIcePolling()) {
+				return;
+			}
+
+			this.icePollDelayMs = Math.min(ICE_POLL_MAX_MS, this.icePollDelayMs * 2);
+			this.scheduleIcePoll(id, this.icePollDelayMs);
+		} finally {
+			this.icePollInFlight = false;
+		}
 	}
 }

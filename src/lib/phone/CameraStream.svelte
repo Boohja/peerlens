@@ -21,6 +21,7 @@
 	let cameras = $state<MediaDeviceInfo[]>([]);
 	let selectedCameraId = $state('');
 	let showIpv6FallbackModal = $state(false);
+	const hasActiveConnectedSession = $derived(started && signalingStatus === 'Connected');
 
 	let idleOverlay = $state(false);
 	let idleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -32,6 +33,12 @@
 		getSessionId: () => sessionId,
 		onStatusChange: (nextStatus) => {
 			signalingStatus = nextStatus;
+			if (nextStatus !== 'Connected') {
+				clearIdleTimer();
+				idleOverlay = false;
+				idleTimerVisualKey += 1;
+				void syncPreviewPlayback();
+			}
 		},
 		onErrorChange: (nextError) => {
 			error = nextError;
@@ -66,6 +73,12 @@
 	}
 
 	function resetIdleTimer() {
+		if (!hasActiveConnectedSession) {
+			clearIdleTimer();
+			idleOverlay = false;
+			return;
+		}
+
 		if (idleTimer) clearTimeout(idleTimer);
 		idleOverlay = false;
 		idleTimerVisualKey += 1;
@@ -77,7 +90,7 @@
 	}
 
 	function triggerIdleMode() {
-		if (!started) return;
+		if (!hasActiveConnectedSession) return;
 		clearIdleTimer();
 		idleOverlay = true;
 		void syncPreviewPlayback();
@@ -91,7 +104,7 @@
 	}
 
 	function onWindowInteraction() {
-		if (!started || idleOverlay) return;
+		if (!hasActiveConnectedSession || idleOverlay) return;
 		resetIdleTimer();
 	}
 
@@ -335,49 +348,34 @@
 	</div>
 {/if}
 
+<div class="status-line mb-8"><strong>Status</strong>: {signalingStatus}</div>
 <div class="camera-stream">
 	<div class="preview-column">
 		<video bind:this={videoEl} autoplay muted playsinline class="preview" class:preview-hidden={idleOverlay}></video>
 	</div>
 
 	<div class="content-column">
-		<p class="preview-note">This stream is sent to the viewer.</p>
-		<p class="status">Status: {signalingStatus}</p>
+		<div class="preview-note pb-4">This stream is sent to the viewer.</div>
 
-		{#if cameras.length > 1}
-			<div class="camera-picker">
-				<label for="camera-select">Camera</label>
-				<select
-					id="camera-select"
-					class="select-phone"
-					bind:value={selectedCameraId}
-					onchange={onCameraChange}
-					disabled={loadingCameras}
-				>
-					{#each cameras as camera, index}
-						<option value={camera.deviceId}>
-							{camera.label || `Camera ${index + 1}`}
-						</option>
-					{/each}
-				</select>
-			</div>
-		{/if}
 
 		<div class="actions">
-			<button
-				type="button"
-				class="btn btn-phone idle-mode-button"
-				onclick={triggerIdleMode}
-				disabled={!started || idleOverlay}
-			>
-				<CountdownRing
-					durationMs={IDLE_TIMEOUT_MS}
-					animationKey={idleTimerVisualKey}
-					size="1.1rem"
-					complete={idleOverlay}
-				/>
-				<span>{idleOverlay ? 'Energy saving active' : 'Energy saving mode'}</span>
-			</button>
+			{#if cameras.length > 1}
+				<div class="camera-picker">
+					<select
+						id="camera-select"
+						class="select-phone"
+						bind:value={selectedCameraId}
+						onchange={onCameraChange}
+						disabled={loadingCameras}
+					>
+						{#each cameras as camera, index}
+							<option value={camera.deviceId}>
+								{camera.label || `Camera ${index + 1}`}
+							</option>
+						{/each}
+					</select>
+				</div>
+			{/if}
 
 			<button
 				class="btn btn-phone"
@@ -389,13 +387,29 @@
 						onCancel?.();
 				}}
 			>
+				<svg class="icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="100%" height="100%" color="currentColor" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+						<path d="M12 21.5H12H12C16.4783 21.5 18.7175 21.5 20.1088 20.1088C21.5 18.7175 21.5 16.4783 21.5 12V12V12C21.5 7.52165 21.5 5.28248 20.1088 3.89124C18.7175 2.5 16.4783 2.5 12 2.5C7.52166 2.5 5.28249 2.5 3.89124 3.89124C2.5 5.28249 2.5 7.52166 2.5 12C2.5 16.4783 2.5 18.7175 3.89124 20.1088C5.28248 21.5 7.52165 21.5 12 21.5Z" />
+						<path d="M15 9L9 14.9996M15 15L9 9.00039" />
+				</svg>
 				Leave
 			</button>
+			{#if hasActiveConnectedSession}
+				<button
+					type="button"
+					class="btn btn-phone btn-subtle idle-mode-button"
+					onclick={triggerIdleMode}
+					disabled={!hasActiveConnectedSession || idleOverlay}
+				>
+					<CountdownRing
+						durationMs={IDLE_TIMEOUT_MS}
+						animationKey={idleTimerVisualKey}
+						size="1.1rem"
+						complete={idleOverlay}
+					/>
+					<span>Power saving</span>
+				</button>
+			{/if}
 		</div>
-
-		{#if error}
-			<p class="error">{error}</p>
-		{/if}
 	</div>
 </div>
 
@@ -458,16 +472,13 @@
 		width: 100%;
 	}
 
-	.camera-picker label {
-		font-size: 0.9rem;
-	}
 
 	.camera-picker select {
 		padding: 0.75rem 1rem;
-		border-radius: 0.75rem;
+		border-radius: 99rem;
 		font: inherit;
 		font-size: 16px;
-		border: 1px solid;
+		border: 1px solid #a1736b;
 		cursor: pointer;
 		width: 100%;
 		max-width: 100%;
@@ -529,7 +540,7 @@
 	.actions {
 		display: flex;
 		flex-wrap: wrap;
-		gap: 0.75rem;
+		gap: 2rem;
 	}
 
 	.actions :global(.btn) {
@@ -542,21 +553,11 @@
 		gap: 0.5rem;
 	}
 
-	.status {
-		margin: 0;
-		opacity: 0.85;
-		font-size: 0.9rem;
-	}
 
 	.preview-note {
 		margin: 0;
 		font-size: 0.9rem;
 		opacity: 0.85;
-	}
-
-	.error {
-		color: #ff8a8a;
-		margin: 0;
 	}
 
 	.modal-backdrop {
