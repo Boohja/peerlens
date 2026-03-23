@@ -90,7 +90,9 @@
 		class:fit-cover={videoFit === 'cover'}
 	></video>
 
-	<p class="status">{status}</p>
+	<div class="place-items-center mt-6">
+		<div class="status-line">{status}</div>
+	</div>
 
 	{#if status === 'Disconnected'}
 		<button class="btn btn-viewer retry-btn" type="button" onclick={() => onRetry?.()}>
@@ -100,10 +102,6 @@
 </div>
 
 <style>
-	.status {
-		color: #d8ffd8;
-	}
-
 	.video-wrap {
 		position: relative;
 	}

@@ -78,7 +78,7 @@
 		{/if}
 	</div>
 
-	<p class="status-line"><strong>Status:</strong> {status || 'Preparing session...'}</p>
+	<div class="status-line"><strong>Status:</strong> {status || 'Preparing session...'}</div>
 
 	<div class="grid grid-cols-2 gap-6">
 		<button class="btn btn-viewer" type="button" onclick={() => onRenew?.()}>
@@ -161,10 +161,6 @@
 		font-size: 0.8rem;
 		opacity: 0.65;
 		word-break: break-all;
-	}
-
-	.status-line {
-		word-break: break-word;
 	}
 
 	.blur {

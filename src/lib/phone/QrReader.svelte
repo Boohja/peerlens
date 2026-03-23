@@ -64,10 +64,13 @@
 <style>
 	.qr-reader {
 		display: grid;
+		place-items: center;
+		width: 100%;
 	}
 
 	.qr-video {
-		width: 100%;
+		width: min(100%, 92vmin);
+		max-width: 100%;
 		aspect-ratio: 1;
 		background: #000;
 		border-radius: 5px;
