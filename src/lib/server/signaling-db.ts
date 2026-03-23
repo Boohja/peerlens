@@ -35,6 +35,25 @@ export const signalingClient = createClient(
 let initialized: Promise<void> | null = null;
 let nextCleanupAtMs = 0;
 
+function isDuplicateColumnError(error: unknown): boolean {
+	if (!(error instanceof Error)) {
+		return false;
+	}
+
+	const message = error.message.toLowerCase();
+	return message.includes('duplicate column name') || message.includes('already exists');
+}
+
+async function addColumnIfMissing(sql: string): Promise<void> {
+	try {
+		await signalingClient.execute(sql);
+	} catch (error) {
+		if (!isDuplicateColumnError(error)) {
+			throw error;
+		}
+	}
+}
+
 export function asString(value: InValue): string | null {
 	if (typeof value === 'string') {
 		return value;
@@ -128,19 +147,17 @@ export async function ensureSignalingInitialized(): Promise<void> {
 			);
 		`);
 
-		await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS expires_at INTEGER`);
-		await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS connected_at INTEGER`);
-		await signalingClient.execute(
-			`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS viewer_state TEXT CHECK(viewer_state IN ('offered', 'waiting', 'party', 'left'))`
+		await addColumnIfMissing(`ALTER TABLE sessions ADD COLUMN expires_at INTEGER`);
+		await addColumnIfMissing(`ALTER TABLE sessions ADD COLUMN connected_at INTEGER`);
+		await addColumnIfMissing(
+			`ALTER TABLE sessions ADD COLUMN viewer_state TEXT CHECK(viewer_state IN ('offered', 'waiting', 'party', 'left'))`
 		);
-		await signalingClient.execute(
-			`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS phone_state TEXT CHECK(phone_state IN ('offered', 'waiting', 'party', 'left'))`
+		await addColumnIfMissing(
+			`ALTER TABLE sessions ADD COLUMN phone_state TEXT CHECK(phone_state IN ('offered', 'waiting', 'party', 'left'))`
 		);
-		await signalingClient.execute(
-			`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS state_version INTEGER NOT NULL DEFAULT 0`
-		);
-		await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS viewer_state_at INTEGER`);
-		await signalingClient.execute(`ALTER TABLE sessions ADD COLUMN IF NOT EXISTS phone_state_at INTEGER`);
+		await addColumnIfMissing(`ALTER TABLE sessions ADD COLUMN state_version INTEGER NOT NULL DEFAULT 0`);
+		await addColumnIfMissing(`ALTER TABLE sessions ADD COLUMN viewer_state_at INTEGER`);
+		await addColumnIfMissing(`ALTER TABLE sessions ADD COLUMN phone_state_at INTEGER`);
 
 		await signalingClient.execute(`UPDATE sessions SET state_version = 0 WHERE state_version IS NULL`);
 
