@@ -98,6 +98,27 @@ body.theme-phone {
   margin: 0;
 }
 
+.site-footer-kofi {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 8.5rem;
+  min-height: 2.4rem;
+}
+
+.site-footer-kofi-widget {
+  position: absolute!important;
+  right: auto!important;
+  bottom: auto!important;
+  transform: translate(-50%, -50%)!important;
+  z-index: auto!important;
+  margin: 0!important;
+}
+
+.site-footer-kofi-widget .floatingchat-container {
+  margin: 0!important;
+}
+
 .site-footer a {
   text-decoration: underline;
   text-underline-offset: 0.15em;
@@ -472,12 +493,12 @@ body.theme-viewer .scope-phone, body.theme-phone .scope-viewer {
   }
   .site-footer {
     flex-direction: column;
-    align-items: flex-start;
+    align-items: center;
     padding-left: 0.5rem;
     padding-right: 0.5rem;
   }
   .site-footer-links {
-    justify-content: flex-start;
+    justify-content: center;
     flex-wrap: wrap;
   }
   .page {
