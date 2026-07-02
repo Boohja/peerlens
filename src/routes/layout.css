@@ -83,8 +83,12 @@ body.theme-phone {
 }
 
 .site-footer {
+  width: 100vw;
+  box-sizing: border-box;
   margin-top: 0.5rem;
-  padding: 0.85rem 0.65rem 1.1rem;
+  margin-left: 50%;
+  padding: 0.85rem max(0.75rem, calc((100vw - 1120px) / 2)) 1.1rem;
+  transform: translateX(-50%);
   border-top: 1px solid rgba(3, 76, 83, 0.3);
   color: color-mix(in srgb, var(--primary) 88%, white 12%);
   display: flex;
@@ -494,8 +498,8 @@ body.theme-viewer .scope-phone, body.theme-phone .scope-viewer {
   .site-footer {
     flex-direction: column;
     align-items: center;
-    padding-left: 0.5rem;
-    padding-right: 0.5rem;
+    padding-left: 0.75rem;
+    padding-right: 0.75rem;
   }
   .site-footer-links {
     justify-content: center;
